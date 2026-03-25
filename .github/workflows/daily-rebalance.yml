@@ -1,0 +1,47 @@
+name: Daily Portfolio Rebalance
+
+on:
+  # Runs at 09:35 AM ET (13:35 UTC) on weekdays — shortly after market open.
+  # Adjust the UTC time to match your preferred execution window.
+  schedule:
+    - cron: "35 13 * * 1-5"
+
+  # Allows you to trigger a run manually from the GitHub Actions tab.
+  workflow_dispatch:
+
+jobs:
+  rebalance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # 1. Check out the repository (includes ems.py and targets.json)
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # 2. Set up Python 3.11
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # 3. Install dependencies
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 4. Run the EMS script.
+      #    PUBLIC_SECRET_KEY is pulled from GitHub Secrets — never stored in code.
+      - name: Run EMS
+        env:
+          PUBLIC_SECRET_KEY: ${{ secrets.PUBLIC_SECRET_KEY }}
+        run: python ems.py
+
+      # 5. Upload the log file as a downloadable artifact (kept for 7 days).
+      - name: Upload log artifact
+        if: always()   # upload even if the script failed
+        uses: actions/upload-artifact@v4
+        with:
+          name: ems-log-${{ github.run_id }}
+          path: ems.log
+          retention-days: 7

@@ -1,0 +1,9 @@
+# ─────────────────────────────────────────────────────────────────
+# requirements.txt — Install with:  pip install -r requirements.txt
+# ─────────────────────────────────────────────────────────────────
+
+# HTTP client for all API calls
+requests>=2.31.0
+
+# Loads .env file into os.environ automatically
+python-dotenv>=1.0.0

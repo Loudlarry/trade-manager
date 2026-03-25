@@ -1,0 +1,13 @@
+{
+  "_comment": "Target portfolio weights. Must sum to <= 1.0. Remainder stays as cash.",
+  "NVDA": 0.15,
+  "AAPL": 0.10,
+  "MSFT": 0.12,
+  "GOOGL": 0.10,
+  "AMZN": 0.10,
+  "META": 0.08,
+  "TSLA": 0.07,
+  "BRK.B": 0.08,
+  "JPM": 0.07,
+  "V": 0.06
+}
