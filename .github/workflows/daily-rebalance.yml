@@ -1,6 +1,7 @@
 name: Daily Portfolio Rebalance
 
 on:
+workflow_dispatch:
   # Runs at 09:35 AM ET (13:35 UTC) on weekdays — shortly after market open.
   # Adjust the UTC time to match your preferred execution window.
   schedule:
