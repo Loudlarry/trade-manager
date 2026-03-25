@@ -2,11 +2,9 @@ name: Daily Portfolio Rebalance
 
 on:
   # Runs at 09:35 AM ET (13:35 UTC) on weekdays — shortly after market open.
-  # Adjust the UTC time to match your preferred execution window.
   schedule:
     - cron: "35 13 * * 1-5"
-    workflow_dispatch:
-
+  
   # Allows you to trigger a run manually from the GitHub Actions tab.
   workflow_dispatch:
 
