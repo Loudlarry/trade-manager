@@ -400,6 +400,8 @@ def calculate_orders(
       1. Reserve CASH_BUFFER_PCT % of total value as uninvested buffer.
       2. Compute current weight for every position.
       3. Flag positions whose |drift| > DRIFT_THRESHOLD.
+         Exception: positions removed from targets.json (target = 0%) are
+         always fully sold regardless of size — treated as intentional exits.
       4. Generate sell orders first (to free cash), then buy orders.
       5. Skip any order whose absolute dollar amount < MIN_ORDER_DOLLARS.
 
@@ -448,7 +450,12 @@ def calculate_orders(
         )
 
         # ── Drift gate ────────────────────────────────────────────────────
-        if abs(drift) <= DRIFT_THRESHOLD:
+        # Exception: if a ticker has been removed from targets.json entirely
+        # (target_weight == 0) and we still hold it, always sell regardless of
+        # position size — this is an intentional full exit, not drift noise.
+        is_full_exit = target_weight == 0.0 and current_value > 0.0
+
+        if not is_full_exit and abs(drift) <= DRIFT_THRESHOLD:
             log.info(
                 "%-8s  SKIP  |drift| %.2f%% ≤ threshold %.2f%%",
                 ticker,
