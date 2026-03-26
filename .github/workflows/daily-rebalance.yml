@@ -34,6 +34,10 @@ jobs:
       - name: Run EMS
         env:
           PUBLIC_SECRET_KEY: ${{ secrets.PUBLIC_SECRET_KEY }}
+          # Set this GitHub Actions variable to "false" to enable live trading.
+          # Go to: Settings → Secrets and variables → Actions → Variables → New
+          # Name: EMS_DRY_RUN  Value: false
+          EMS_DRY_RUN: ${{ vars.EMS_DRY_RUN }}
         run: python ems.py
 
       # 5. Upload the log file as a downloadable artifact (kept for 7 days).

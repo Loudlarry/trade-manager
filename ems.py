@@ -98,6 +98,7 @@ class AccountState:
     total_value: float          # Full portfolio value (cash + positions)
     cash_balance: float         # Uninvested cash (cashOnlyBuyingPower)
     holdings: dict[str, float]  # {ticker: current_dollar_value}
+    open_orders_count: int = 0  # Pending/open orders at snapshot time
 
 
 @dataclass
@@ -477,6 +478,19 @@ def get_account_state(client: PublicAPIClient) -> AccountState:
     if not holdings:
         log.warning("No open positions found in portfolio.")
 
+    # Open orders → used to guard against stacking duplicate orders
+    open_orders: list[dict] = portfolio.get("orders", [])
+    open_orders_count = len(open_orders)
+    if open_orders_count:
+        open_tickers = ", ".join(
+            o.get("instrument", {}).get("symbol", "?") for o in open_orders
+        )
+        log.warning(
+            "  %d open/pending order(s) detected: %s",
+            open_orders_count,
+            open_tickers,
+        )
+
     # Total AUM = all invested positions + uninvested cash
     total_value = invested_value + cash_balance
     log.info(
@@ -491,6 +505,7 @@ def get_account_state(client: PublicAPIClient) -> AccountState:
         total_value=total_value,
         cash_balance=cash_balance,
         holdings=holdings,
+        open_orders_count=open_orders_count,
     )
 
 
@@ -762,10 +777,21 @@ def run() -> None:
         # Step 3: Fetch live account state (discovers accountId internally)
         state = get_account_state(client)
 
-        # Step 4: Calculate drift-gated orders
+        # Step 4: Guard — abort if prior orders are still pending.
+        # Submitting new orders while previous ones are unresolved risks
+        # stacking duplicate trades (e.g. buying the same ticker twice).
+        if not DRY_RUN and state.open_orders_count > 0:
+            log.critical(
+                "Aborting: %d open/pending order(s) detected. "
+                "Re-run after all orders have filled or been cancelled.",
+                state.open_orders_count,
+            )
+            sys.exit(1)
+
+        # Step 5: Calculate drift-gated orders
         orders = calculate_orders(targets, state)
 
-        # Step 5: Execute or dry-run
+        # Step 6: Execute or dry-run
         if DRY_RUN:
             log.info("─── DRY RUN — no real orders will be sent ───")
             for order in orders:
@@ -776,6 +802,18 @@ def run() -> None:
                     order.dollar_amount,
                 )
         else:
+            # Sells and buys are submitted in a single run. Buy orders are
+            # sized against the pre-trade snapshot value, which assumes sell
+            # proceeds are available immediately. On a cash account, if
+            # settlement is T+1, some buy orders may be rejected for
+            # insufficient funds — they will be retried on the next run.
+            sells_total = sum(o.dollar_amount for o in orders if o.side == "SELL")
+            if sells_total > 0:
+                log.info(
+                    "Note: $%.2f in sell orders will be submitted before buys. "
+                    "Buy orders assume same-session settlement.",
+                    sells_total,
+                )
             execute_trades(orders, client, account_id=state.account_id)
 
     except FileNotFoundError as exc:
