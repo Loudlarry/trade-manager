@@ -21,6 +21,7 @@ Cron example (daily at 09:35 ET after market open):
 
 import json
 import logging
+import math
 import os
 import sys
 import uuid
@@ -44,8 +45,8 @@ load_dotenv()
 DRY_RUN: bool = os.getenv("EMS_DRY_RUN", "true").lower() != "false"
 
 # Percentage of total account value kept uninvested at all times (covers
-# fees / margin buffer). 0.05 = 5% of total account value.
-CASH_BUFFER_PCT: float = 0.05
+# fees / margin buffer). 0.01 = 1% of total account value.
+CASH_BUFFER_PCT: float = 0.01
 
 # Minimum absolute weight deviation (as a decimal) that triggers a rebalance.
 # 0.05 = 5 percentage points.
@@ -56,6 +57,16 @@ MIN_ORDER_DOLLARS: float = 1.00
 
 # How long the access token remains valid (minutes). Max varies by plan.
 TOKEN_VALIDITY_MINUTES: int = 60
+
+# Tickers that do NOT support fractional shares on Public.com.
+# Orders for these are placed as whole-share QUANTITY orders instead of
+# dollar-amount AMOUNT orders. The script fetches a live quote to calculate
+# how many whole shares the target dollar amount can buy/sell.
+# Add any symbol here that returns a 400 when sent as a fractional order.
+NON_FRACTIONAL: set[str] = {
+    "BRK.B",
+    "BRK.A",
+}
 
 # Path to the targets file (relative to this script).
 TARGETS_FILE: Path = Path(__file__).parent / "targets.json"
@@ -95,6 +106,7 @@ class Order:
     ticker: str
     side: str           # "BUY" or "SELL"  (matches API enum)
     dollar_amount: float
+    current_value: float  # current holding value in dollars (0.0 if new position)
     target_weight: float
     current_weight: float
     drift: float        # current_weight − target_weight (signed)
@@ -229,47 +241,116 @@ class PublicAPIClient:
         """
         return self._get(f"/{account_id}/portfolio/v2")
 
+    def get_quotes(self, account_id: str, tickers: list[str]) -> dict[str, float]:
+        """
+        POST /userapigateway/marketdata/{accountId}/quotes
+        Returns the last price for each requested ticker.
+
+        Request body:
+          { "instruments": [{"symbol": "BRK.B", "type": "EQUITY"}, ...] }
+
+        Response:
+          { "quotes": [{"instrument": {"symbol": "BRK.B"}, "last": "453.21", ...}] }
+
+        Returns: { "BRK.B": 453.21, ... }
+        """
+        self._require_auth()
+        url = f"https://api.public.com/userapigateway/marketdata/{account_id}/quotes"
+        payload = {
+            "instruments": [
+                {"symbol": t.upper(), "type": "EQUITY"} for t in tickers
+            ]
+        }
+        resp = self._session.post(url, json=payload, timeout=15)
+        resp.raise_for_status()
+        return {
+            q["instrument"]["symbol"].upper(): float(q["last"])
+            for q in resp.json().get("quotes", [])
+            if q.get("outcome") == "SUCCESS" and q.get("last")
+        }
+
     def place_order(
         self,
         account_id: str,
         ticker: str,
         side: str,
         dollar_amount: float,
+        last_price: Optional[float] = None,
+        current_value: float = 0.0,
     ) -> dict:
         """
         POST /userapigateway/trading/{accountId}/order
-        Places a fractional, dollar-denominated market order.
 
-        Key request fields:
-          - orderId:    Client-generated UUID (deduplication key)
-          - instrument: { "symbol": "NVDA", "type": "EQUITY" }
-          - orderSide:  "BUY" | "SELL"
-          - orderType:  "MARKET"
-          - expiration: { "timeInForce": "DAY" }
-          - amount:     "150.00"  ← dollar-based fractional field (NOT quantity)
+        Fractional-eligible tickers (default):
+          Uses "amount" field — dollar-denominated notional order.
+
+        Non-fractional tickers (in NON_FRACTIONAL set):
+          Uses "quantity" field — whole shares only.
+          Requires last_price to calculate floor(dollar_amount / price).
+
+          When whole_shares rounds down to 0:
+            - New entry (current_value == 0): warns loudly — allocation is too
+              small to open even 1 share. Increase target weight to fix.
+            - Existing position (current_value > 0): the delta is a sub-share
+              rounding remainder. Accepted silently — the position is as close
+              to target as whole-share trading allows. No order is placed.
 
         Response:
           { "orderId": "fceeb48e-5d9a-4151-9d06-5347bd820ee3" }
-
-        Note: Placement is asynchronous. The returned orderId confirms
-        submission only — poll GET /{accountId}/order/{orderId} for fill status.
         """
-        payload = {
-            # RFC 4122 UUID — serves as idempotency / deduplication key.
+        payload: dict = {
             "orderId": str(uuid.uuid4()),
             "instrument": {
                 "symbol": ticker.upper(),
                 "type": "EQUITY",
             },
-            "orderSide": side.upper(),   # "BUY" or "SELL"
+            "orderSide": side.upper(),
             "orderType": "MARKET",
             "expiration": {
                 "timeInForce": "DAY",
             },
-            # "amount" is the fractional dollar field for notional orders.
-            # "quantity" would be used for whole-share orders instead.
-            "amount": str(round(dollar_amount, 2)),
         }
+
+        if ticker.upper() in NON_FRACTIONAL:
+            if last_price is None or last_price <= 0:
+                raise ValueError(
+                    f"{ticker} is non-fractional but no valid last_price was provided."
+                )
+            # BUY  → floor (never spend more than allocated)
+            # SELL → ceil  (never leave a residual share after a full exit)
+            if side.upper() == "SELL":
+                whole_shares = math.ceil(dollar_amount / last_price)
+            else:
+                whole_shares = math.floor(dollar_amount / last_price)
+            if whole_shares == 0:
+                if current_value == 0.0:
+                    # New position: allocation too small for even 1 share.
+                    # The dollar amount stays as uninvested cash.
+                    log.warning(
+                        "%-8s  SKIP new non-fractional position: "
+                        "$%.2f allocation < 1 share at $%.2f. "
+                        "Allocation kept as cash until price drops or weight increases.",
+                        ticker, dollar_amount, last_price,
+                    )
+                else:
+                    # Existing position: sub-share rounding gap — already as
+                    # close to target as whole-share trading allows.
+                    log.info(
+                        "%-8s  ACCEPT sub-share gap: $%.2f delta < 1 share "
+                        "at $%.2f — position is at maximum attainable weight.",
+                        ticker, dollar_amount, last_price,
+                    )
+                return {}
+            payload["quantity"] = str(whole_shares)
+            leftover = dollar_amount - (whole_shares * last_price)
+            log.info(
+                "  %-8s  non-fractional: %d share(s) @ ~$%.2f = ~$%.2f "
+                "(leftover $%.2f stays as cash)",
+                ticker, whole_shares, last_price, whole_shares * last_price, leftover,
+            )
+        else:
+            payload["amount"] = str(round(dollar_amount, 2))
+
         return self._post(f"/{account_id}/order", payload)
 
 
@@ -303,11 +384,35 @@ def load_targets() -> dict[str, float]:
     # Normalise keys to uppercase
     targets: dict[str, float] = {k.upper(): float(v) for k, v in data.items()}
 
+    # Validate individual weights are non-negative
+    negative = {t: w for t, w in targets.items() if w < 0}
+    if negative:
+        raise ValueError(
+            f"Negative target weight(s) found: "
+            + ", ".join(f"{t}={w}" for t, w in negative.items())
+            + ". All weights must be ≥ 0."
+        )
+
+    if not targets:
+        log.warning(
+            "targets.json contains no tickers. If this is intentional, "
+            "every current holding will be sold (full liquidation)."
+        )
+
     total = sum(targets.values())
     if total > 1.0 + 1e-9:
         raise ValueError(
             f"Target weights sum to {total:.4f}, which exceeds 1.0. "
             "Please review targets.json."
+        )
+
+    max_investable = 1.0 - CASH_BUFFER_PCT
+    if total > max_investable + 1e-9:
+        raise ValueError(
+            f"Target weights sum to {total * 100:.2f}%, but the cash buffer "
+            f"reserves {CASH_BUFFER_PCT * 100:.0f}%, leaving only "
+            f"{max_investable * 100:.0f}% investable. "
+            f"Reduce your target weights to ≤ {max_investable * 100:.0f}%."
         )
 
     log.info(
@@ -488,6 +593,7 @@ def calculate_orders(
             ticker=ticker,
             side="SELL" if delta < 0 else "BUY",
             dollar_amount=abs(delta),
+            current_value=current_value,
             target_weight=target_weight,
             current_weight=current_weight,
             drift=drift,
@@ -542,6 +648,23 @@ def execute_trades(
         log.info("No orders to execute.")
         return
 
+    # Pre-fetch live quotes for any non-fractional tickers in the order list
+    # so we can convert dollar amounts to whole-share quantities.
+    non_frac_tickers = [
+        o.ticker for o in orders if o.ticker.upper() in NON_FRACTIONAL
+    ]
+    quotes: dict[str, float] = {}
+    if non_frac_tickers:
+        log.info(
+            "Fetching quotes for non-fractional ticker(s): %s",
+            ", ".join(non_frac_tickers),
+        )
+        try:
+            quotes = client.get_quotes(account_id, non_frac_tickers)
+        except requests.RequestException as exc:
+            log.error("Failed to fetch quotes for non-fractional tickers: %s", exc)
+            log.error("Non-fractional orders will be skipped this run.")
+
     log.info("Executing %d order(s) …", len(orders))
 
     for i, order in enumerate(orders, start=1):
@@ -554,13 +677,27 @@ def execute_trades(
             order.dollar_amount,
         )
         try:
+            last_price = quotes.get(order.ticker.upper())
+
+            # Skip non-fractional tickers whose quote fetch failed
+            if order.ticker.upper() in NON_FRACTIONAL and not last_price:
+                log.error(
+                    "  ✗ SKIP %s — no quote available for non-fractional order",
+                    order.ticker,
+                )
+                continue
+
             response = client.place_order(
                 account_id=account_id,
                 ticker=order.ticker,
                 side=order.side,
                 dollar_amount=order.dollar_amount,
+                last_price=last_price,
+                current_value=order.current_value,
             )
-            # Response: { "orderId": "fceeb48e-..." }  (submission confirmed only)
+            if not response:
+                # place_order returns {} when whole_shares == 0
+                continue
             returned_order_id = response.get("orderId", "N/A")
             log.info("  ✓ submitted orderId=%s", returned_order_id)
         except requests.HTTPError as exc:
@@ -646,6 +783,9 @@ def run() -> None:
         sys.exit(1)
     except ValueError as exc:
         log.critical("Validation error: %s", exc)
+        sys.exit(1)
+    except RuntimeError as exc:
+        log.critical("Runtime error: %s", exc)
         sys.exit(1)
     except requests.RequestException as exc:
         log.critical("API connectivity error: %s", exc)
