@@ -400,8 +400,9 @@ def calculate_orders(
       1. Reserve CASH_BUFFER_PCT % of total value as uninvested buffer.
       2. Compute current weight for every position.
       3. Flag positions whose |drift| > DRIFT_THRESHOLD.
-         Exception: positions removed from targets.json (target = 0%) are
-         always fully sold regardless of size — treated as intentional exits.
+         Exceptions (always bypasses drift gate):
+           - New entry: in targets.json but not yet held → always buy.
+           - Full exit: removed from targets.json but still held → always sell.
       4. Generate sell orders first (to free cash), then buy orders.
       5. Skip any order whose absolute dollar amount < MIN_ORDER_DOLLARS.
 
@@ -450,12 +451,18 @@ def calculate_orders(
         )
 
         # ── Drift gate ────────────────────────────────────────────────────
-        # Exception: if a ticker has been removed from targets.json entirely
-        # (target_weight == 0) and we still hold it, always sell regardless of
-        # position size — this is an intentional full exit, not drift noise.
+        # Two intentional-action exceptions that always bypass the drift gate:
+        #
+        # 1. Full exit: ticker removed from targets.json (target = 0%) but we
+        #    still hold it → always sell the full position regardless of size.
+        # 2. New entry: ticker added to targets.json but we hold none of it
+        #    (current = 0%) → always open the position regardless of target size.
+        #
+        # Both represent deliberate portfolio decisions, not drift noise.
         is_full_exit = target_weight == 0.0 and current_value > 0.0
+        is_new_entry = current_value == 0.0 and target_weight > 0.0
 
-        if not is_full_exit and abs(drift) <= DRIFT_THRESHOLD:
+        if not is_full_exit and not is_new_entry and abs(drift) <= DRIFT_THRESHOLD:
             log.info(
                 "%-8s  SKIP  |drift| %.2f%% ≤ threshold %.2f%%",
                 ticker,
