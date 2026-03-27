@@ -4,14 +4,21 @@ on:
   # Runs at 09:35 AM ET (13:35 UTC) on weekdays — shortly after market open.
   schedule:
     - cron: "35 13 * * 1-5"
-  
+
   # Allows you to trigger a run manually from the GitHub Actions tab.
+  # Pass deploy_only=true to skip the EMS and just redeploy the dashboard.
   workflow_dispatch:
+    inputs:
+      deploy_only:
+        description: "Skip EMS, deploy dashboard only"
+        required: false
+        default: "false"
 
 jobs:
   rebalance:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    if: ${{ github.event.inputs.deploy_only != 'true' }}
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -55,7 +62,7 @@ jobs:
   deploy-dashboard:
     runs-on: ubuntu-latest
     needs: rebalance
-    if: always()   # deploy even if the rebalance step failed
+    if: always()   # deploy even if the rebalance step failed or was skipped
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
