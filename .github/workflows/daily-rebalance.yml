@@ -12,6 +12,8 @@ jobs:
   rebalance:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       # 1. Check out the repository (includes ems.py and targets.json)
@@ -48,3 +50,34 @@ jobs:
           name: ems-log-${{ github.run_id }}
           path: ems.log
           retention-days: 7
+
+  # Deploy the static dashboard to GitHub Pages after every rebalance run.
+  deploy-dashboard:
+    runs-on: ubuntu-latest
+    needs: rebalance
+    if: always()   # deploy even if the rebalance step failed
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
