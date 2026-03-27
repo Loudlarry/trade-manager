@@ -163,6 +163,25 @@
             transition: opacity .25s, transform .25s; pointer-events: none; z-index: 500;
         }
         .toast.show { opacity: 1; transform: translateY(0); }
+
+        /* ── Portfolio weight bars ── */
+        .alloc-bar {
+            display: inline-block;
+            width: 120px; height: 8px;
+            background: #21262d; border-radius: 3px;
+            position: relative; overflow: visible;
+        }
+        .alloc-bar-cur {
+            height: 100%; position: absolute; left: 0; top: 0;
+            background: #1f6feb; border-radius: 3px;
+            min-width: 0; transition: width .4s ease;
+        }
+        .alloc-bar-tgt {
+            position: absolute; top: -3px;
+            width: 2px; height: 14px;
+            background: #58a6ff; border-radius: 1px;
+            transform: translateX(-50%);
+        }
     </style>
 </head>
 <body>
@@ -190,6 +209,10 @@
         <div class="setup-field">
             <label>Workflow file name</label>
             <input type="text" id="setup-workflow" placeholder="daily-rebalance.yml">
+        </div>
+        <div class="setup-field" style="margin-top:6px">
+            <label>Public.com Secret Key <span style="color:#3fb950;font-size:0.72rem;font-weight:400">(optional — enables live portfolio view)</span></label>
+            <input type="password" id="setup-public-key" placeholder="Leave blank to show targets only" autocomplete="new-password">
         </div>
         <div class="setup-error" id="setup-error"></div>
         <div style="margin-top:20px;display:flex;gap:10px">
@@ -248,6 +271,36 @@
 
     <hr class="divider">
 
+    <!-- Portfolio weights -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:11px">
+        <div class="section-title" style="margin:0">Portfolio Weights</div>
+        <div style="display:flex;align-items:center;gap:8px">
+            <span id="portfolio-meta" style="font-size:0.74rem;color:#8b949e"></span>
+            <button class="btn-secondary" onclick="loadPortfolio()" style="padding:4px 9px;font-size:0.73rem">↻ Refresh</button>
+        </div>
+    </div>
+    <div class="table-wrap" style="margin-bottom:22px">
+        <table>
+            <thead>
+                <tr>
+                    <th>Ticker</th>
+                    <th>Value</th>
+                    <th>Current</th>
+                    <th>Target</th>
+                    <th>Drift</th>
+                    <th style="min-width:130px">Allocation</th>
+                </tr>
+            </thead>
+            <tbody id="portfolio-tbody">
+                <tr><td colspan="6" style="color:#8b949e;text-align:center;padding:22px">
+                    <span class="spinner"></span>&nbsp;Loading…
+                </td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <hr class="divider">
+
     <!-- Recent runs table -->
     <div class="section-title">Recent Runs</div>
     <div class="table-wrap">
@@ -299,10 +352,12 @@
 const LS_PAT      = "ems_pat";
 const LS_REPO     = "ems_repo";
 const LS_WORKFLOW = "ems_workflow";
+const LS_PUBLIC   = "ems_public_key";
 
-let PAT      = localStorage.getItem(LS_PAT)      || "";
-let REPO     = localStorage.getItem(LS_REPO)     || "Loudlarry/trade-manager";
-let WORKFLOW = localStorage.getItem(LS_WORKFLOW) || "daily-rebalance.yml";
+let PAT        = localStorage.getItem(LS_PAT)      || "";
+let REPO       = localStorage.getItem(LS_REPO)     || "Loudlarry/trade-manager";
+let WORKFLOW   = localStorage.getItem(LS_WORKFLOW) || "daily-rebalance.yml";
+let PUBLIC_KEY = localStorage.getItem(LS_PUBLIC)   || "";
 
 // ── Runtime state ─────────────────────────────────────────────────────────────
 let runsData      = [];
@@ -334,6 +389,7 @@ function saveSetup() {
     const pat  = document.getElementById("setup-pat").value.trim();
     const repo = document.getElementById("setup-repo").value.trim();
     const wf   = document.getElementById("setup-workflow").value.trim();
+    const pub  = document.getElementById("setup-public-key").value.trim();
     const err  = document.getElementById("setup-error");
 
     if (!pat)  { err.textContent = "PAT is required.";        err.style.display="block"; return; }
@@ -344,14 +400,16 @@ function saveSetup() {
     localStorage.setItem(LS_PAT,      PAT);
     localStorage.setItem(LS_REPO,     REPO);
     localStorage.setItem(LS_WORKFLOW, WORKFLOW);
+    if (pub) { PUBLIC_KEY = pub; localStorage.setItem(LS_PUBLIC, PUBLIC_KEY); }
     err.style.display = "none";
     showApp();
 }
 
 function openSettings() {
-    document.getElementById("setup-pat").value      = "";
-    document.getElementById("setup-repo").value     = REPO;
-    document.getElementById("setup-workflow").value = WORKFLOW;
+    document.getElementById("setup-pat").value        = "";
+    document.getElementById("setup-repo").value       = REPO;
+    document.getElementById("setup-workflow").value   = WORKFLOW;
+    document.getElementById("setup-public-key").value = "";
     document.getElementById("setup-overlay").style.display = "flex";
 }
 
@@ -608,7 +666,140 @@ async function selectRun(runId, runNumber, ghUrl) {
         logGhLink.style.display = "";
     }
 }
+// ── Portfolio weights ──────────────────────────────────────────────────────────────────
+async function loadPortfolio() {
+    const tbody = document.getElementById("portfolio-tbody");
+    const meta  = document.getElementById("portfolio-meta");
+    const SCALE = 16; // bar represents 0–16% weight
 
+    tbody.innerHTML = `<tr><td colspan="6" style="color:#8b949e;text-align:center;padding:18px">
+        <span class="spinner"></span>&nbsp;Loading…</td></tr>`;
+    meta.textContent = "";
+
+    // ─ Step 1: Load targets.json from the GitHub repo ──────────────────────
+    let targets = {};
+    try {
+        const raw = await ghGet("contents/targets.json");
+        const json = JSON.parse(atob(raw.content.replace(/\n/g, "")));
+        targets = json;
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" style="color:#f85149;text-align:center;padding:18px">
+            Failed to load targets.json from repo: ${esc(e.message)}</td></tr>`;
+        return;
+    }
+
+    // ─ Step 2: Try to fetch live data from Public.com (browser CORS) ───────
+    let holdings = null;  // null → no live data
+    let cash = null;
+    let total = null;
+
+    if (PUBLIC_KEY) {
+        try {
+            const authResp = await fetch(
+                "https://api.public.com/userapiauthservice/personal/access-tokens",
+                {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({validityInMinutes: 60, secret: PUBLIC_KEY}),
+                }
+            );
+            if (!authResp.ok) throw new Error(`Auth HTTP ${authResp.status}`);
+            const token = (await authResp.json()).accessToken;
+            const apiH  = {"Authorization": `Bearer ${token}`};
+
+            const accResp = await fetch(
+                "https://api.public.com/userapigateway/trading/account",
+                {headers: apiH}
+            );
+            if (!accResp.ok) throw new Error(`Accounts HTTP ${accResp.status}`);
+            const accounts = (await accResp.json()).accounts || [];
+            if (!accounts.length) throw new Error("No accounts found");
+            const accountId = (accounts.find(a => a.accountType === "BROKERAGE") || accounts[0]).accountId;
+
+            const portResp = await fetch(
+                `https://api.public.com/userapigateway/trading/${accountId}/portfolio/v2`,
+                {headers: apiH}
+            );
+            if (!portResp.ok) throw new Error(`Portfolio HTTP ${portResp.status}`);
+            const port = await portResp.json();
+
+            cash     = parseFloat(port.buyingPower?.cashOnlyBuyingPower || 0);
+            holdings = {};
+            for (const pos of (port.positions || [])) {
+                const t = pos.instrument.symbol.toUpperCase();
+                holdings[t] = parseFloat(pos.currentValue);
+            }
+            total = Object.values(holdings).reduce((s, v) => s + v, 0) + cash;
+        } catch (e) {
+            // CORS or API error — degrade gracefully, show targets only
+            meta.textContent = "(live data unavailable — showing targets only)";
+        }
+    }
+
+    // ─ Step 3: Build table ─────────────────────────────────────────────
+    const fmt$ = v => "$" + v.toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2});
+    const liveMode = holdings !== null && total > 0;
+
+    if (liveMode) {
+        meta.innerHTML =
+            `Total: <strong style="color:#f0f6fc">${fmt$(total)}</strong>` +
+            `&nbsp;·&nbsp;Cash: <strong style="color:#f0f6fc">${fmt$(cash)}</strong>` +
+            `&nbsp;(${(cash/total*100).toFixed(2)}%)`;
+    } else if (!PUBLIC_KEY) {
+        meta.innerHTML = `<span style="color:#d29922">Add Public.com key in Settings for live balances</span>`;
+    }
+
+    function driftCell(drift) {
+        if (drift === null) return `<span style="color:#8b949e">—</span>`;
+        const abs = Math.abs(drift);
+        const col = abs < 3 ? "#8b949e" : abs < 5 ? "#d29922" : drift > 0 ? "#f85149" : "#3fb950";
+        return `<span style="color:${col}">${drift > 0 ? "+" : ""}${drift.toFixed(2)}%</span>`;
+    }
+
+    function allocBar(curWt, tgtWt, fillColor) {
+        const curPct = Math.min((curWt  / SCALE) * 100, 100).toFixed(1);
+        const tgtPct = Math.min(Math.max((tgtWt / SCALE) * 100, 0), 100).toFixed(1);
+        const fill   = fillColor ? `background:${fillColor}` : "";
+        const tick   = tgtWt > 0
+            ? `<div class="alloc-bar-tgt" style="left:${tgtPct}%"></div>` : "";
+        return `<div class="alloc-bar"><div class="alloc-bar-cur" style="width:${curPct}%;${fill}"></div>${tick}</div>`;
+    }
+
+    const allTickers = [...new Set([...Object.keys(holdings || {}), ...Object.keys(targets)])];
+    const rows = allTickers.map(ticker => {
+        const tgtWt  = (targets[ticker] || 0) * 100;
+        const curVal = liveMode ? (holdings[ticker] || 0) : null;
+        const curWt  = liveMode ? (curVal / total * 100) : null;
+        const drift  = liveMode ? +(curWt - tgtWt).toFixed(2) : null;
+        return {ticker, tgtWt, curVal, curWt, drift};
+    }).sort((a, b) => b.tgtWt - a.tgtWt || a.ticker.localeCompare(b.ticker));
+
+    tbody.innerHTML = rows.map(row => `
+        <tr>
+            <td style="font-weight:600;color:#f0f6fc">${esc(row.ticker)}</td>
+            <td style="color:#8b949e">${row.curVal !== null ? fmt$(row.curVal) : "—"}</td>
+            <td>${row.curWt !== null ? row.curWt.toFixed(2) + "%" : `<span style="color:#8b949e">—</span>`}</td>
+            <td style="color:#8b949e">${row.tgtWt > 0 ? row.tgtWt.toFixed(2) + "%" : `<span style="color:#f85149">exit</span>`}</td>
+            <td>${driftCell(row.drift)}</td>
+            <td>${allocBar(row.curWt ?? row.tgtWt, row.tgtWt)}</td>
+        </tr>`).join("");
+
+    // Cash row (live only)
+    if (liveMode) {
+        const cashWt = cash / total * 100;
+        const cashD  = +(cashWt - 1).toFixed(2);
+        const cashC  = Math.abs(cashD) < 0.5 ? "#8b949e" : Math.abs(cashD) < 2 ? "#d29922" : "#f85149";
+        tbody.innerHTML += `
+            <tr style="border-top:1px solid #30363d">
+                <td style="font-weight:600;color:#8b949e">CASH</td>
+                <td style="color:#8b949e">${fmt$(cash)}</td>
+                <td style="color:#8b949e">${cashWt.toFixed(2)}%</td>
+                <td style="color:#8b949e">1.00%</td>
+                <td><span style="color:${cashC}">${cashD >= 0 ? "+" : ""}${cashD.toFixed(2)}%</span></td>
+                <td>${allocBar(cashWt, 1, "#8b949e")}</td>
+            </tr>`;
+    }
+}
 // ── Workflow controls ─────────────────────────────────────────────────────────
 async function disableWorkflow() {
     if (!confirm("Pause the daily automation?\n\nNo trades will run until you resume it.")) return;
@@ -686,7 +877,7 @@ function resetCountdown() {
 }
 
 async function loadAll() {
-    await Promise.allSettled([loadRuns(), loadWorkflowState()]);
+    await Promise.allSettled([loadRuns(), loadWorkflowState(), loadPortfolio()]);
     const now = new Date().toLocaleTimeString(undefined, { hour:"2-digit", minute:"2-digit" });
     document.getElementById("last-refreshed").textContent = "Updated " + now;
     resetCountdown();
