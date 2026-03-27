@@ -808,7 +808,20 @@ def run() -> None:
             # settlement is T+1, some buy orders may be rejected for
             # insufficient funds — they will be retried on the next run.
             sells_total = sum(o.dollar_amount for o in orders if o.side == "SELL")
-            if sells_total > 0:
+            buys_total = sum(o.dollar_amount for o in orders if o.side == "BUY")
+            available_for_buys = state.cash_balance + sells_total
+            if buys_total > available_for_buys + 1e-2:
+                log.warning(
+                    "Cash may be insufficient: buys=$%.2f vs "
+                    "cash=$%.2f + sell proceeds=$%.2f ($%.2f). "
+                    "Some buy orders may be rejected if sell proceeds "
+                    "are not immediately available as buying power.",
+                    buys_total,
+                    state.cash_balance,
+                    sells_total,
+                    available_for_buys,
+                )
+            elif sells_total > 0:
                 log.info(
                     "Note: $%.2f in sell orders will be submitted before buys. "
                     "Buy orders assume same-session settlement.",
