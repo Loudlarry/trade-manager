@@ -1,0 +1,5 @@
+# Dashboard dependencies (local use only — not needed for GitHub Actions)
+# Install with: pip install -r requirements-dashboard.txt
+flask>=3.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0

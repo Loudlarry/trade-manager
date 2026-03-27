@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EMS Trade Manager</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            padding: 28px;
+            min-height: 100vh;
+        }
+
+        /* ── Header ── */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 28px;
+            padding-bottom: 18px;
+            border-bottom: 1px solid #21262d;
+        }
+        h1 { color: #f0f6fc; font-size: 1.35rem; font-weight: 600; letter-spacing: -0.3px; }
+        .subtitle { color: #8b949e; font-size: 0.82rem; margin-top: 3px; }
+        .refresh-meta { font-size: 0.75rem; color: #8b949e; text-align: right; }
+
+        /* ── Cards ── */
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 14px;
+            margin-bottom: 24px;
+        }
+        .card {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 8px;
+            padding: 16px 18px;
+        }
+        .card-label {
+            font-size: 0.72rem;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            font-weight: 500;
+        }
+        .card-value {
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #f0f6fc;
+            margin-top: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .green  { color: #3fb950; }
+        .red    { color: #f85149; }
+        .yellow { color: #d29922; }
+        .grey   { color: #8b949e; }
+
+        /* ── Status dot ── */
+        .dot {
+            width: 9px; height: 9px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        .dot-green  { background: #3fb950; box-shadow: 0 0 5px #3fb950; }
+        .dot-grey   { background: #8b949e; }
+        .dot-yellow { background: #d29922; box-shadow: 0 0 5px #d29922; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+        /* ── Controls ── */
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 26px;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 500;
+            letter-spacing: 0.1px;
+            transition: opacity .15s, transform .1s;
+        }
+        button:hover:not(:disabled) { opacity: .82; }
+        button:active:not(:disabled) { transform: scale(.97); }
+        button:disabled { opacity: .38; cursor: not-allowed; }
+        .btn-danger    { background: #da3633; color: #fff; }
+        .btn-success   { background: #1a7f37; color: #fff; }
+        .btn-primary   { background: #1f6feb; color: #fff; }
+        .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+
+        /* ── Section title ── */
+        .section-title {
+            font-size: 0.88rem;
+            font-weight: 600;
+            color: #f0f6fc;
+            margin-bottom: 12px;
+        }
+
+        /* ── Table ── */
+        .table-wrap {
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #21262d;
+            margin-bottom: 24px;
+        }
+        table { width: 100%; border-collapse: collapse; font-size: 0.84rem; background: #161b22; }
+        thead { background: #1c2128; }
+        th {
+            color: #8b949e;
+            text-align: left;
+            padding: 10px 14px;
+            font-weight: 500;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        td { padding: 10px 14px; border-top: 1px solid #21262d; vertical-align: middle; }
+        tbody tr:hover td { background: #1c2128; cursor: pointer; }
+        tbody tr.selected td { background: #162032; }
+
+        /* ── Badges ── */
+        .badge {
+            display: inline-block;
+            padding: 2px 9px;
+            border-radius: 12px;
+            font-size: 0.73rem;
+            font-weight: 500;
+        }
+        .badge-success  { background: rgba(63,185,80,.15);  color: #3fb950; border: 1px solid rgba(63,185,80,.3); }
+        .badge-failure  { background: rgba(248,81,73,.15);  color: #f85149; border: 1px solid rgba(248,81,73,.3); }
+        .badge-running  { background: rgba(210,153,34,.15); color: #d29922; border: 1px solid rgba(210,153,34,.3); }
+        .badge-skipped  { background: rgba(139,148,158,.15);color: #8b949e; border: 1px solid rgba(139,148,158,.3); }
+
+        /* ── Log panel ── */
+        .log-panel {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .log-toolbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 16px;
+            border-bottom: 1px solid #21262d;
+            background: #1c2128;
+        }
+        .log-body {
+            font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+            font-size: 0.78rem;
+            line-height: 1.65;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 420px;
+            overflow-y: auto;
+            padding: 14px 16px;
+            color: #8b949e;
+        }
+        .log-body::-webkit-scrollbar { width: 6px; }
+        .log-body::-webkit-scrollbar-track { background: #0d1117; }
+        .log-body::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+        /* Log line colours */
+        .l-info     { color: #79c0ff; }
+        .l-warn     { color: #d29922; }
+        .l-err      { color: #f85149; }
+        .l-buy      { color: #3fb950; font-weight: 600; }
+        .l-sell     { color: #f85149; font-weight: 600; }
+        .l-sep      { color: #30363d; }
+        .l-dry      { color: #8b949e; font-style: italic; }
+
+        /* ── Spinner ── */
+        .spinner {
+            display: inline-block;
+            width: 13px; height: 13px;
+            border: 2px solid #30363d;
+            border-top-color: #58a6ff;
+            border-radius: 50%;
+            animation: spin .6s linear infinite;
+            vertical-align: middle;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ── Toast ── */
+        .toast {
+            position: fixed;
+            bottom: 22px; right: 22px;
+            background: #1c2128;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 11px 18px;
+            font-size: 0.84rem;
+            color: #f0f6fc;
+            opacity: 0;
+            transform: translateY(8px);
+            transition: opacity .25s, transform .25s;
+            pointer-events: none;
+            z-index: 200;
+            max-width: 340px;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+
+        /* ── Divider ── */
+        .divider { border: none; border-top: 1px solid #21262d; margin: 24px 0; }
+
+        /* ── Portfolio weight bars ── */
+        .alloc-bar {
+            display: inline-block;
+            width: 120px; height: 8px;
+            background: #21262d; border-radius: 3px;
+            position: relative; overflow: visible;
+        }
+        .alloc-bar-cur {
+            height: 100%; position: absolute; left: 0; top: 0;
+            background: #1f6feb; border-radius: 3px;
+            min-width: 0; transition: width .4s ease;
+        }
+        .alloc-bar-tgt {
+            position: absolute; top: -3px;
+            width: 2px; height: 14px;
+            background: #58a6ff; border-radius: 1px;
+            transform: translateX(-50%);
+        }
+
+        /* ── Modal overlay ── */
+        .modal-overlay {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,.65);
+            backdrop-filter: blur(3px);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 300; padding: 20px;
+        }
+        .modal-overlay.hidden { display: none; }
+        .modal {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            width: 100%; max-width: 480px;
+            box-shadow: 0 20px 60px rgba(0,0,0,.6);
+            max-height: 90vh; overflow-y: auto;
+        }
+        .modal-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 16px 20px;
+            border-bottom: 1px solid #21262d;
+            font-weight: 600; font-size: 0.95rem; color: #f0f6fc;
+            position: sticky; top: 0; background: #161b22; z-index: 1;
+        }
+        .modal-close {
+            background: none; border: none; color: #8b949e;
+            font-size: 1.1rem; cursor: pointer; padding: 2px 8px; border-radius: 4px;
+        }
+        .modal-close:hover { background: #21262d; color: #f0f6fc; }
+        .modal-body { padding: 20px; }
+        .modal-section-label {
+            font-size: 0.72rem; font-weight: 600; color: #8b949e;
+            text-transform: uppercase; letter-spacing: 0.7px; margin-bottom: 10px;
+        }
+        .field-row { margin-bottom: 14px; }
+        .field-row label { display: block; font-size: 0.81rem; color: #c9d1d9; margin-bottom: 5px; }
+        .field-row input[type="text"],
+        .field-row input[type="password"] {
+            background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+            color: #c9d1d9; font-size: 0.84rem; padding: 7px 10px;
+            width: 100%; outline: none; transition: border-color .15s;
+        }
+        .field-row input:focus { border-color: #58a6ff; }
+        .input-with-toggle { position: relative; }
+        .input-with-toggle input { padding-right: 36px; }
+        .btn-toggle-vis {
+            position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+            background: none; border: none; cursor: pointer;
+            font-size: 0.9rem; color: #8b949e; padding: 2px 4px;
+        }
+        .btn-toggle-vis:hover { color: #f0f6fc; }
+        .cfg-status {
+            font-size: 0.72rem; font-weight: 500; margin-left: 6px;
+            padding: 1px 7px; border-radius: 10px;
+        }
+        .cfg-status.set   { background: rgba(63,185,80,.15);  color: #3fb950; border: 1px solid rgba(63,185,80,.3); }
+        .cfg-status.unset { background: rgba(248,81,73,.15);  color: #f85149; border: 1px solid rgba(248,81,73,.3); }
+        /* Targets editor inputs */
+        input.tgt-ticker, input.tgt-weight {
+            background: #0d1117; border: 1px solid #30363d; border-radius: 5px;
+            color: #c9d1d9; font-size: 0.84rem; padding: 5px 8px;
+            outline: none; transition: border-color .15s;
+        }
+        input.tgt-ticker:focus, input.tgt-weight:focus { border-color: #58a6ff; }
+        input.tgt-ticker { width: 110px; }
+        input.tgt-weight { width: 84px; text-align: right; }
+        .tgt-remove {
+            background: none; border: none; color: #f85149;
+            cursor: pointer; font-size: 1rem; padding: 2px 7px; border-radius: 4px;
+        }
+        .tgt-remove:hover { background: rgba(248,81,73,.15); }
+        .modal tbody tr:hover td { cursor: default; background: transparent; }
+    </style>
+</head>
+<body>
+
+<header>
+    <div>
+        <h1>EMS Trade Manager</h1>
+        <div class="subtitle">{{ repo }}</div>
+    </div>
+    <div class="refresh-meta">
+        Auto-refresh in <span id="countdown">60</span>s
+        <br><span id="last-refreshed" style="color:#30363d"></span>
+    </div>
+</header>
+
+<!-- Status cards -->
+<div class="cards">
+    <div class="card">
+        <div class="card-label">Automation</div>
+        <div class="card-value" id="card-automation">
+            <span class="spinner"></span>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-label">Last Run</div>
+        <div class="card-value grey" id="card-last-run">—</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Last Result</div>
+        <div class="card-value grey" id="card-last-result">—</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Trade Mode</div>
+        <div class="card-value grey" id="card-mode">—</div>
+    </div>
+    <div class="card">
+        <div class="card-label">Total Runs</div>
+        <div class="card-value grey" id="card-total-runs">—</div>
+    </div>
+</div>
+
+<!-- Action buttons -->
+<div class="controls">
+    <button class="btn-danger"   id="btn-pause"   onclick="disableWorkflow()">⏸ Pause Automation</button>
+    <button class="btn-success"  id="btn-resume"  onclick="enableWorkflow()"  style="display:none">▶ Resume Automation</button>
+    <button class="btn-primary"  id="btn-run"     onclick="triggerRun()">⚡ Run Now</button>
+    <button class="btn-secondary"                 onclick="loadAll()">↻ Refresh</button>
+    <button class="btn-secondary"                 onclick="openSettings()">⚙ Settings</button>
+</div>
+
+<hr class="divider">
+
+<!-- Portfolio weights -->
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+    <div class="section-title" style="margin:0">Portfolio Weights</div>
+    <div style="display:flex;align-items:center;gap:8px">
+        <span id="portfolio-meta" style="font-size:0.75rem;color:#8b949e"></span>
+        <button class="btn-secondary" onclick="loadPortfolio()" style="padding:4px 10px;font-size:0.75rem">↻ Refresh</button>
+        <button class="btn-secondary" onclick="openTargets()"   style="padding:4px 10px;font-size:0.75rem">✎ Edit Targets</button>
+    </div>
+</div>
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Ticker</th>
+                <th>Value</th>
+                <th>Current</th>
+                <th>Target</th>
+                <th>Drift</th>
+                <th style="min-width:140px">Allocation</th>
+            </tr>
+        </thead>
+        <tbody id="portfolio-tbody">
+            <tr>
+                <td colspan="6" style="color:#8b949e;text-align:center;padding:22px">
+                    <span class="spinner"></span>&nbsp; Loading…
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<hr class="divider">
+
+<!-- Recent runs table -->
+<div class="section-title">Recent Runs</div>
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Date / Time</th>
+                <th>Duration</th>
+                <th>Result</th>
+                <th>Commit</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="runs-tbody">
+            <tr>
+                <td colspan="6" style="color:#8b949e;text-align:center;padding:22px">
+                    <span class="spinner"></span>&nbsp; Loading…
+                </td>
+            </tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- Log viewer -->
+<div class="log-panel">
+    <div class="log-toolbar">
+        <span class="section-title" style="margin:0" id="log-title">Log — click a run row to view</span>
+        <div style="display:flex;gap:8px">
+            <button class="btn-secondary" onclick="scrollLogBottom()" style="padding:4px 10px;font-size:0.75rem">↓ Bottom</button>
+            <button class="btn-secondary" onclick="copyLog()"         style="padding:4px 10px;font-size:0.75rem">⎘ Copy</button>
+        </div>
+    </div>
+    <div class="log-body" id="log-body">
+Select a run from the table above to view its log output.
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- ══ Settings Modal ══════════════════════════════════════════════════════ -->
+<div id="modal-settings" class="modal-overlay hidden" onclick="if(event.target===this)closeSettings()">
+    <div class="modal">
+        <div class="modal-header">
+            <span>⚙ Settings</span>
+            <button class="modal-close" onclick="closeSettings()">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="modal-section-label">Public.com API</div>
+            <div class="field-row">
+                <label>Secret Key <span id="cfg-public-status" class="cfg-status"></span></label>
+                <div class="input-with-toggle">
+                    <input type="password" id="cfg-public-key" placeholder="Enter your secret key…" autocomplete="new-password">
+                    <button class="btn-toggle-vis" onclick="toggleVis('cfg-public-key',this)" tabindex="-1">👁</button>
+                </div>
+            </div>
+
+            <div class="modal-section-label" style="margin-top:20px">GitHub Integration</div>
+            <div class="field-row">
+                <label>Personal Access Token <span id="cfg-pat-status" class="cfg-status"></span></label>
+                <div class="input-with-toggle">
+                    <input type="password" id="cfg-pat" placeholder="ghp_…" autocomplete="new-password">
+                    <button class="btn-toggle-vis" onclick="toggleVis('cfg-pat',this)" tabindex="-1">👁</button>
+                </div>
+            </div>
+            <div class="field-row">
+                <label>Repository</label>
+                <input type="text" id="cfg-repo" placeholder="owner/repo-name" autocomplete="off">
+            </div>
+            <div style="font-size:0.74rem;color:#8b949e;margin-top:-6px;margin-bottom:18px">
+                Required scopes: <code style="background:#0d1117;padding:1px 5px;border-radius:3px">repo</code>
+                or <code style="background:#0d1117;padding:1px 5px;border-radius:3px">actions:read</code> +
+                <code style="background:#0d1117;padding:1px 5px;border-radius:3px">actions:write</code>
+                — create at <a href="https://github.com/settings/tokens/new" target="_blank"
+                style="color:#58a6ff">github.com/settings/tokens</a>
+            </div>
+            <div style="display:flex;gap:10px">
+                <button class="btn-primary" onclick="saveConfig()" id="btn-save-config">Save Changes</button>
+                <button class="btn-secondary" onclick="closeSettings()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ══ Targets Editor Modal ════════════════════════════════════════════════ -->
+<div id="modal-targets" class="modal-overlay hidden" onclick="if(event.target===this)closeTargets()">
+    <div class="modal" style="max-width:560px">
+        <div class="modal-header">
+            <span>✎ Edit Target Weights</span>
+            <button class="modal-close" onclick="closeTargets()">✕</button>
+        </div>
+        <div class="modal-body">
+            <div style="font-size:0.78rem;color:#8b949e;margin-bottom:16px">
+                Set the target allocation for each ticker. Total must be <strong style="color:#c9d1d9">≤ 99%</strong> —
+                the remainder is kept as cash buffer. The EMS rebalances daily toward these targets.
+            </div>
+            <div class="table-wrap" style="margin-bottom:14px;max-height:370px;overflow-y:auto">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Ticker</th>
+                            <th style="text-align:right;padding-right:20px">Target Weight (%)</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="targets-edit-tbody"></tbody>
+                </table>
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:18px">
+                <button class="btn-secondary" onclick="addTargetRow()" style="padding:5px 13px;font-size:0.8rem">+ Add Ticker</button>
+                <div style="font-size:0.85rem">
+                    Total:&nbsp;<span id="targets-total" style="font-weight:600">0.00%</span>
+                    <span id="targets-total-hint" style="margin-left:8px;font-size:0.75rem;color:#8b949e"></span>
+                </div>
+            </div>
+            <div style="display:flex;gap:10px">
+                <button class="btn-success" onclick="saveTargets()" id="btn-save-targets">💾 Save Targets</button>
+                <button class="btn-secondary" onclick="closeTargets()">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+"use strict";
+
+// ── State ────────────────────────────────────────────────────────────────────
+let runsData     = [];
+let currentLog   = "";
+let selectedRunId = null;
+let countdownVal = 60;
+let countdownTmr = null;
+
+// ── Utilities ────────────────────────────────────────────────────────────────
+function esc(s) {
+    return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+function toast(msg, borderColor) {
+    const el = document.getElementById("toast");
+    el.textContent  = msg;
+    el.style.borderColor = borderColor || "#30363d";
+    el.classList.add("show");
+    setTimeout(() => el.classList.remove("show"), 3500);
+}
+
+function relativeTime(iso) {
+    if (!iso) return "—";
+    const diff = Math.round((Date.now() - new Date(iso)) / 1000);
+    if (diff < 60)   return diff + "s ago";
+    if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+    if (diff < 86400)return Math.floor(diff / 3600) + "h ago";
+    return Math.floor(diff / 86400) + "d ago";
+}
+
+function fmtTime(iso) {
+    if (!iso) return "—";
+    return new Date(iso).toLocaleString(undefined, {
+        month: "short", day: "numeric",
+        hour: "2-digit", minute: "2-digit"
+    });
+}
+
+function fmtDuration(start, end) {
+    if (!start || !end) return "—";
+    const s = Math.round((new Date(end) - new Date(start)) / 1000);
+    return s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s";
+}
+
+function badge(status, conclusion) {
+    if (status === "in_progress" || status === "queued")
+        return `<span class="badge badge-running">Running</span>`;
+    if (conclusion === "success")
+        return `<span class="badge badge-success">Success</span>`;
+    if (conclusion === "failure")
+        return `<span class="badge badge-failure">Failed</span>`;
+    if (conclusion === "cancelled")
+        return `<span class="badge badge-skipped">Cancelled</span>`;
+    return `<span class="badge badge-skipped">${esc(conclusion || status)}</span>`;
+}
+
+function colorizeLog(text) {
+    return text.split("\n").map(line => {
+        const l = esc(line);
+        if (/CRITICAL|ERROR/.test(line))             return `<span class="l-err">${l}</span>`;
+        if (/WARNING/.test(line))                    return `<span class="l-warn">${l}</span>`;
+        if (/DRY RUN|DRY\]/.test(line))              return `<span class="l-dry">${l}</span>`;
+        if (/\bBUY\b/.test(line))                    return `<span class="l-buy">${l}</span>`;
+        if (/\bSELL\b/.test(line))                   return `<span class="l-sell">${l}</span>`;
+        if (/={10,}/.test(line))                     return `<span class="l-sep">${l}</span>`;
+        if (/INFO/.test(line))                       return `<span class="l-info">${l}</span>`;
+        return l;
+    }).join("\n");
+}
+
+// ── Data loading ─────────────────────────────────────────────────────────────
+async function loadRuns() {
+    const tbody = document.getElementById("runs-tbody");
+    try {
+        const resp = await fetch("/api/runs");
+        if (!resp.ok) throw new Error(resp.statusText);
+        runsData = await resp.json();
+
+        if (!runsData.length) {
+            tbody.innerHTML = `<tr><td colspan="6" style="color:#8b949e;text-align:center;padding:22px">No runs found.</td></tr>`;
+            return;
+        }
+
+        tbody.innerHTML = runsData.map(r => `
+            <tr id="row-${r.id}" onclick="selectRun(${r.id}, ${r.run_number})">
+                <td style="color:#8b949e">#${r.run_number}</td>
+                <td>
+                    <div>${fmtTime(r.created_at)}</div>
+                    <div style="font-size:0.72rem;color:#8b949e">${relativeTime(r.created_at)}</div>
+                </td>
+                <td style="color:#8b949e">${fmtDuration(r.created_at, r.updated_at)}</td>
+                <td>${badge(r.status, r.conclusion)}</td>
+                <td style="color:#8b949e;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                    title="${esc(r.head_commit_message)}">${esc(r.head_commit_message)}</td>
+                <td><a href="${esc(r.html_url)}" target="_blank"
+                       style="color:#58a6ff;font-size:0.75rem;text-decoration:none"
+                       onclick="event.stopPropagation()">↗</a></td>
+            </tr>
+        `).join("");
+
+        // Re-highlight selected row
+        if (selectedRunId) {
+            document.getElementById(`row-${selectedRunId}`)?.classList.add("selected");
+        }
+
+        // Update summary cards
+        const latest = runsData[0];
+        document.getElementById("card-last-run").textContent    = fmtTime(latest.created_at);
+        document.getElementById("card-last-run").className      = "card-value";
+        document.getElementById("card-total-runs").textContent  = runsData.length + "+ runs";
+        document.getElementById("card-total-runs").className    = "card-value";
+
+        const resultEl = document.getElementById("card-last-result");
+        if (latest.conclusion === "success") {
+            resultEl.textContent = "Success"; resultEl.className = "card-value green";
+        } else if (latest.conclusion === "failure") {
+            resultEl.textContent = "Failed";  resultEl.className = "card-value red";
+        } else if (latest.status === "in_progress") {
+            resultEl.innerHTML = `<span class="dot dot-yellow"></span>Running…`;
+            resultEl.className = "card-value yellow";
+        } else {
+            resultEl.textContent = latest.conclusion || latest.status;
+            resultEl.className = "card-value grey";
+        }
+
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" style="color:#f85149;text-align:center;padding:22px">
+            Failed to load runs: ${esc(e.message)}</td></tr>`;
+    }
+}
+
+async function loadWorkflowState() {
+    const el = document.getElementById("card-automation");
+    try {
+        const resp  = await fetch("/api/workflow_state");
+        if (!resp.ok) throw new Error(resp.statusText);
+        const data  = await resp.json();
+        const active = data.state === "active";
+
+        document.getElementById("btn-pause").style.display  = active ? "" : "none";
+        document.getElementById("btn-resume").style.display = active ? "none" : "";
+
+        if (active) {
+            el.innerHTML  = `<span class="dot dot-green"></span>Active`;
+            el.className  = "card-value green";
+        } else {
+            el.innerHTML  = `<span class="dot dot-grey"></span>Paused`;
+            el.className  = "card-value grey";
+        }
+    } catch (e) {
+        el.innerHTML = `<span class="dot dot-grey"></span>Unknown`;
+        el.className = "card-value grey";
+    }
+}
+
+async function selectRun(runId, runNumber) {
+    // Highlight row
+    if (selectedRunId) document.getElementById(`row-${selectedRunId}`)?.classList.remove("selected");
+    selectedRunId = runId;
+    document.getElementById(`row-${runId}`)?.classList.add("selected");
+
+    const logTitle = document.getElementById("log-title");
+    const logBody  = document.getElementById("log-body");
+    logTitle.innerHTML = `<span class="spinner"></span>&nbsp;Loading log for Run #${runNumber}…`;
+    logBody.innerHTML  = "";
+
+    try {
+        const resp = await fetch(`/api/logs/${runId}`);
+        if (!resp.ok) throw new Error(resp.statusText);
+        const data = await resp.json();
+        currentLog = data.log;
+        logTitle.textContent = `Log — Run #${runNumber}`;
+        logBody.innerHTML    = colorizeLog(currentLog);
+
+        // Detect trade mode from log
+        const modeEl = document.getElementById("card-mode");
+        if (currentLog.includes("DRY_RUN=False")) {
+            modeEl.textContent = "Live Trading"; modeEl.className = "card-value green";
+        } else if (currentLog.includes("DRY_RUN=True")) {
+            modeEl.textContent = "Dry Run";      modeEl.className = "card-value yellow";
+        }
+
+    } catch (e) {
+        logTitle.textContent = `Log — Run #${runNumber}`;
+        logBody.innerHTML = `<span class="l-err">Failed to load log: ${esc(e.message)}</span>`;
+    }
+}
+// ── Portfolio ───────────────────────────────────────────────────────────────────────
+async function loadPortfolio() {
+    const tbody = document.getElementById("portfolio-tbody");
+    const meta  = document.getElementById("portfolio-meta");
+    if (!tbody) return;
+    const SCALE = 16; // bars scale to 16% — covers max ~12% (VST) with headroom
+
+    tbody.innerHTML = `<tr><td colspan="6" style="color:#8b949e;text-align:center;padding:22px">
+        <span class="spinner"></span>&nbsp; Loading…</td></tr>`;
+
+    try {
+        const resp = await fetch("/api/portfolio");
+        if (!resp.ok) {
+            const d = await resp.json().catch(() => ({}));
+            throw new Error(d.error || resp.statusText);
+        }
+        const data = await resp.json();
+
+        const fmt$ = v => "$" + v.toLocaleString("en-US", {
+            minimumFractionDigits: 2, maximumFractionDigits: 2
+        });
+
+        meta.innerHTML =
+            `Total: <strong style="color:#f0f6fc">${fmt$(data.total_value)}</strong>` +
+            `&nbsp;·&nbsp;Cash: <strong style="color:#f0f6fc">${fmt$(data.cash)}</strong>` +
+            `&nbsp;(${data.cash_weight.toFixed(2)}%)`;
+
+        function driftCell(drift) {
+            const abs   = Math.abs(drift);
+            const color = abs < 3 ? "#8b949e" : abs < 5 ? "#d29922"
+                        : drift > 0 ? "#f85149" : "#3fb950";
+            const sign  = drift > 0 ? "+" : "";
+            return drift === 0
+                ? `<span style="color:#8b949e">—</span>`
+                : `<span style="color:${color}">${sign}${drift.toFixed(2)}%</span>`;
+        }
+
+        function allocBar(curWt, tgtWt, fillColor) {
+            const curPct = Math.min(curWt  / SCALE * 100, 100).toFixed(1);
+            const tgtPct = Math.min(Math.max(tgtWt / SCALE * 100, 0), 100).toFixed(1);
+            const fill   = fillColor ? `background:${fillColor}` : "";
+            const tick   = tgtWt > 0
+                ? `<div class="alloc-bar-tgt" style="left:${tgtPct}%"></div>` : "";
+            return `<div class="alloc-bar">` +
+                   `<div class="alloc-bar-cur" style="width:${curPct}%;${fill}"></div>` +
+                   tick + `</div>`;
+        }
+
+        tbody.innerHTML = data.rows.map(row => `
+            <tr>
+                <td style="font-weight:600;color:#f0f6fc">${esc(row.ticker)}</td>
+                <td style="color:#8b949e">${fmt$(row.value)}</td>
+                <td>${row.current_weight.toFixed(2)}%</td>
+                <td style="color:#8b949e">${row.target_weight > 0
+                    ? row.target_weight.toFixed(2) + "%"
+                    : '<span style="color:#f85149">exit</span>'}</td>
+                <td>${driftCell(row.drift)}</td>
+                <td>${allocBar(row.current_weight, row.target_weight)}</td>
+            </tr>`).join("");
+
+        // Cash row
+        const cashD = +(data.cash_weight - 1).toFixed(2);
+        const cashC = Math.abs(cashD) < 0.5 ? "#8b949e"
+                    : Math.abs(cashD) < 2   ? "#d29922" : "#f85149";
+        const cashS = cashD >= 0 ? "+" : "";
+        tbody.innerHTML += `
+            <tr style="border-top:1px solid #30363d">
+                <td style="font-weight:600;color:#8b949e">CASH</td>
+                <td style="color:#8b949e">${fmt$(data.cash)}</td>
+                <td style="color:#8b949e">${data.cash_weight.toFixed(2)}%</td>
+                <td style="color:#8b949e">1.00%</td>
+                <td><span style="color:${cashC}">${cashS}${cashD.toFixed(2)}%</span></td>
+                <td>${allocBar(data.cash_weight, 1, "#8b949e")}</td>
+            </tr>`;
+
+    } catch (e) {
+        meta.textContent = "";
+        tbody.innerHTML = `<tr><td colspan="6" style="color:#f85149;text-align:center;padding:22px">
+            Failed to load portfolio: ${esc(e.message)}</td></tr>`;
+    }
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+async function openSettings() {
+    document.getElementById("cfg-public-key").value = "";
+    document.getElementById("cfg-pat").value = "";
+    document.getElementById("modal-settings").classList.remove("hidden");
+    await loadConfig();
+}
+
+function closeSettings() {
+    document.getElementById("modal-settings").classList.add("hidden");
+    document.getElementById("cfg-public-key").value = "";
+    document.getElementById("cfg-pat").value = "";
+}
+
+async function loadConfig() {
+    try {
+        const resp = await fetch("/api/config");
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        const pubSt = document.getElementById("cfg-public-status");
+        pubSt.textContent = data.PUBLIC_SECRET_KEY_set ? "SET" : "NOT SET";
+        pubSt.className   = "cfg-status " + (data.PUBLIC_SECRET_KEY_set ? "set" : "unset");
+
+        const patSt = document.getElementById("cfg-pat-status");
+        patSt.textContent = data.GITHUB_PAT_set ? "SET" : "NOT SET";
+        patSt.className   = "cfg-status " + (data.GITHUB_PAT_set ? "set" : "unset");
+
+        document.getElementById("cfg-repo").value = data.GITHUB_REPO || "";
+    } catch (_) { /* silent — server may be warming up */ }
+}
+
+async function saveConfig() {
+    const btn = document.getElementById("btn-save-config");
+    btn.disabled = true;
+    const body   = {};
+    const pubKey = document.getElementById("cfg-public-key").value.trim();
+    const pat    = document.getElementById("cfg-pat").value.trim();
+    const repo   = document.getElementById("cfg-repo").value.trim();
+    if (pubKey) body.PUBLIC_SECRET_KEY = pubKey;
+    if (pat)    body.GITHUB_PAT        = pat;
+    if (repo)   body.GITHUB_REPO       = repo;
+    if (!Object.keys(body).length) {
+        toast("No changes — fill at least one field.", "#d29922");
+        btn.disabled = false; return;
+    }
+    try {
+        const r = await fetch("/api/config", {
+            method:  "POST",
+            headers: {"Content-Type": "application/json"},
+            body:    JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || r.statusText);
+        toast("Saved: " + d.updated.join(", "), "#3fb950");
+        closeSettings();
+        loadAll();
+    } catch (e) { toast("Error: " + e.message, "#f85149"); }
+    btn.disabled = false;
+}
+
+function toggleVis(inputId, btn) {
+    const el = document.getElementById(inputId);
+    el.type  = el.type === "password" ? "text" : "password";
+    btn.textContent = el.type === "password" ? "👁" : "🙈";
+}
+
+// ── Targets Editor ────────────────────────────────────────────────────────────
+let targetRows = [];
+
+async function openTargets() {
+    document.getElementById("modal-targets").classList.remove("hidden");
+    await loadTargets();
+}
+
+function closeTargets() {
+    document.getElementById("modal-targets").classList.add("hidden");
+}
+
+async function loadTargets() {
+    try {
+        const resp = await fetch("/api/targets");
+        if (!resp.ok) throw new Error(resp.statusText);
+        const data = await resp.json();
+        targetRows = Object.entries(data)
+            .map(([t, w]) => ({ticker: t, weight: +(w * 100).toFixed(4)}))
+            .sort((a, b) => b.weight - a.weight);
+        renderTargetRows();
+    } catch (e) {
+        toast("Failed to load targets: " + e.message, "#f85149");
+    }
+}
+
+function renderTargetRows() {
+    const tbody = document.getElementById("targets-edit-tbody");
+    tbody.innerHTML = targetRows.map((row, i) => `
+        <tr>
+            <td>
+                <input class="tgt-ticker" value="${esc(row.ticker)}" maxlength="10" placeholder="AAPL"
+                    oninput="targetRows[${i}].ticker=this.value.toUpperCase();this.value=this.value.toUpperCase()">
+            </td>
+            <td style="text-align:right;padding-right:14px">
+                <input class="tgt-weight" type="number" value="${row.weight}" min="0" max="99" step="0.1"
+                    placeholder="0.0"
+                    oninput="targetRows[${i}].weight=parseFloat(this.value)||0;updateTargetTotal()">
+            </td>
+            <td>
+                <button class="tgt-remove" onclick="removeTargetRow(${i})" title="Remove row">✕</button>
+            </td>
+        </tr>`).join("");
+    updateTargetTotal();
+}
+
+function addTargetRow() {
+    targetRows.push({ticker: "", weight: 0});
+    renderTargetRows();
+    const inputs = document.querySelectorAll(".tgt-ticker");
+    if (inputs.length) inputs[inputs.length - 1].focus();
+}
+
+function removeTargetRow(i) {
+    targetRows.splice(i, 1);
+    renderTargetRows();
+}
+
+function updateTargetTotal() {
+    const total = targetRows.reduce((s, r) => s + (parseFloat(r.weight) || 0), 0);
+    const el    = document.getElementById("targets-total");
+    const hint  = document.getElementById("targets-total-hint");
+    el.textContent = total.toFixed(2) + "%";
+    if (total > 99) {
+        el.style.color   = "#f85149";
+        hint.textContent = "⚠ Exceeds 99% limit";
+        hint.style.color = "#f85149";
+    } else {
+        el.style.color   = total > 96 ? "#d29922" : "#3fb950";
+        hint.textContent = "cash buffer ~" + (100 - total).toFixed(2) + "%";
+        hint.style.color = "#8b949e";
+    }
+}
+
+async function saveTargets() {
+    const btn   = document.getElementById("btn-save-targets");
+    btn.disabled = true;
+
+    const total = targetRows.reduce((s, r) => s + (parseFloat(r.weight) || 0), 0);
+    if (total > 99) {
+        toast("Total exceeds 99% — reduce some weights first.", "#f85149");
+        btn.disabled = false; return;
+    }
+
+    const targets = {};
+    for (const row of targetRows) {
+        const ticker = row.ticker.trim().toUpperCase();
+        const weight = parseFloat(row.weight) || 0;
+        if (!ticker) { toast("All rows must have a ticker symbol.", "#f85149"); btn.disabled = false; return; }
+        if (weight <= 0) continue;
+        if (targets[ticker]) { toast("Duplicate ticker: " + ticker, "#f85149"); btn.disabled = false; return; }
+        targets[ticker] = +(weight / 100).toFixed(6);
+    }
+    if (!Object.keys(targets).length) {
+        toast("No non-zero targets to save.", "#d29922"); btn.disabled = false; return;
+    }
+
+    try {
+        const r = await fetch("/api/targets", {
+            method:  "POST",
+            headers: {"Content-Type": "application/json"},
+            body:    JSON.stringify({targets}),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || r.statusText);
+        toast("Saved " + Object.keys(d.saved).length + " targets.", "#3fb950");
+        closeTargets();
+        loadPortfolio();
+    } catch (e) { toast("Error: " + e.message, "#f85149"); }
+    btn.disabled = false;
+}
+
+// ── Controls ─────────────────────────────────────────────────────────────────
+async function disableWorkflow() {
+    if (!confirm("Pause the daily automation?\n\nNo trades will run until you resume it.")) return;
+    const btn = document.getElementById("btn-pause");
+    btn.disabled = true;
+    try {
+        const r = await fetch("/api/disable", { method: "POST" });
+        if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+        toast("Automation paused.", "#d29922");
+        await loadWorkflowState();
+    } catch (e) { toast("Error: " + e.message, "#f85149"); }
+    btn.disabled = false;
+}
+
+async function enableWorkflow() {
+    const btn = document.getElementById("btn-resume");
+    btn.disabled = true;
+    try {
+        const r = await fetch("/api/enable", { method: "POST" });
+        if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+        toast("Automation resumed.", "#3fb950");
+        await loadWorkflowState();
+    } catch (e) { toast("Error: " + e.message, "#f85149"); }
+    btn.disabled = false;
+}
+
+async function triggerRun() {
+    if (!confirm(
+        "Trigger a run now?\n\n" +
+        "⚠ If EMS_DRY_RUN=false this will place REAL trades.\n\n" +
+        "Check the Trade Mode card before confirming."
+    )) return;
+    const btn = document.getElementById("btn-run");
+    btn.disabled = true;
+    try {
+        const r = await fetch("/api/trigger", { method: "POST" });
+        if (!r.ok) throw new Error((await r.json()).error || r.statusText);
+        toast("Run queued — refreshing in 15s…", "#58a6ff");
+        setTimeout(loadAll, 15000);
+    } catch (e) { toast("Error: " + e.message, "#f85149"); }
+    btn.disabled = false;
+}
+
+function copyLog() {
+    if (!currentLog) { toast("No log loaded."); return; }
+    navigator.clipboard.writeText(currentLog)
+        .then(() => toast("Copied to clipboard.", "#3fb950"))
+        .catch(() => toast("Copy failed — browser blocked clipboard."));
+}
+
+function scrollLogBottom() {
+    const el = document.getElementById("log-body");
+    el.scrollTop = el.scrollHeight;
+}
+
+// ── Auto-refresh ─────────────────────────────────────────────────────────────
+function resetCountdown() {
+    clearInterval(countdownTmr);
+    countdownVal = 60;
+    document.getElementById("countdown").textContent = countdownVal;
+    countdownTmr = setInterval(() => {
+        countdownVal--;
+        document.getElementById("countdown").textContent = countdownVal;
+        if (countdownVal <= 0) loadAll();
+    }, 1000);
+}
+
+async function loadAll() {
+    await Promise.all([loadRuns(), loadWorkflowState(), loadPortfolio()]);
+    const now = new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    document.getElementById("last-refreshed").textContent = "Updated " + now;
+    resetCountdown();
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+loadAll();
+</script>
+</body>
+</html>
