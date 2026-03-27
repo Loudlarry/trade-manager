@@ -1,9 +1,9 @@
 name: Daily Portfolio Rebalance
 
 on:
-  # Runs at 09:35 AM ET (13:35 UTC) on weekdays — shortly after market open.
+  # Runs at 10:00 AM ET (14:00 UTC) on weekdays.
   schedule:
-    - cron: "35 13 * * 1-5"
+    - cron: "0 14 * * 1-5"
 
   # Allows you to trigger a run manually from the GitHub Actions tab.
   # Pass deploy_only=true to skip the EMS and just redeploy the dashboard.
