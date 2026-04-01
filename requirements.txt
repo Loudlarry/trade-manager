@@ -7,3 +7,8 @@ requests>=2.31.0
 
 # Loads .env file into os.environ automatically
 python-dotenv>=1.0.0
+
+# ── Dashboard (Render hosting + local) ───────────────────────────
+flask>=3.0.0
+gunicorn>=21.2.0
+yfinance>=0.2.40
