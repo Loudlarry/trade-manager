@@ -305,6 +305,7 @@
         .tgt-remove:hover { background: rgba(248,81,73,.15); }
         .modal tbody tr:hover td { cursor: default; background: transparent; }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -313,9 +314,21 @@
         <h1>EMS Trade Manager</h1>
         <div class="subtitle">{{ repo }}</div>
     </div>
-    <div class="refresh-meta">
-        Auto-refresh in <span id="countdown">60</span>s
-        <br><span id="last-refreshed" style="color:#30363d"></span>
+    <div style="text-align:right">
+        <div class="refresh-meta" style="margin-bottom:6px">
+            Auto-refresh in <span id="countdown">60</span>s
+            &nbsp;·&nbsp; <span id="last-refreshed"></span>
+        </div>
+        <form method="POST" action="/logout" style="display:inline">
+            <button type="submit"
+                    style="background:none;border:1px solid #30363d;border-radius:5px;
+                           color:#8b949e;font-size:0.72rem;padding:3px 9px;cursor:pointer;
+                           transition:color .15s,border-color .15s"
+                    onmouseover="this.style.color='#f0f6fc';this.style.borderColor='#8b949e'"
+                    onmouseout="this.style.color='#8b949e';this.style.borderColor='#30363d'">
+                Sign out
+            </button>
+        </form>
     </div>
 </header>
 
@@ -385,6 +398,43 @@
             </tr>
         </tbody>
     </table>
+</div>
+
+<hr class="divider">
+
+<!-- ══ Performance vs Benchmarks ════════════════════════════════════════════ -->
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+    <div>
+        <div class="section-title" style="margin-bottom:3px">Performance vs Benchmarks</div>
+        <div style="font-size:0.72rem;color:#8b949e">SPY &amp; QQQ buy-and-hold with reinvested dividends (adjusted close)</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+        <select id="perf-range" onchange="loadPerformance()"
+                style="background:#161b22;border:1px solid #30363d;border-radius:5px;
+                       color:#c9d1d9;font-size:0.78rem;padding:4px 8px;outline:none;cursor:pointer">
+            <option value="all" selected>All Time</option>
+            <option value="ytd">YTD</option>
+            <option value="90">90d</option>
+            <option value="30">30d</option>
+        </select>
+        <button class="btn-secondary" onclick="loadPerformance()" style="padding:4px 10px;font-size:0.75rem">↻ Refresh</button>
+    </div>
+</div>
+
+<div class="card" style="padding:20px;margin-bottom:24px">
+    <div id="perf-message" style="display:none;text-align:center;padding:40px;
+         color:#8b949e;font-size:0.85rem;line-height:1.6"></div>
+    <div id="perf-content">
+        <div id="perf-stats"
+             style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+                    gap:10px;margin-bottom:18px"></div>
+        <div style="position:relative;height:280px">
+            <canvas id="perf-chart"></canvas>
+        </div>
+        <div style="font-size:0.70rem;color:#30363d;margin-top:10px;text-align:right">
+            History recorded daily when dashboard loads · Benchmarks via Yahoo Finance (adjusted close)
+        </div>
+    </div>
 </div>
 
 <hr class="divider">
@@ -521,6 +571,7 @@ let currentLog   = "";
 let selectedRunId = null;
 let countdownVal = 60;
 let countdownTmr = null;
+let perfChart    = null;
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 function esc(s) {
@@ -965,6 +1016,225 @@ async function saveTargets() {
     btn.disabled = false;
 }
 
+// ── Performance Chart ─────────────────────────────────────────────────────────
+async function loadPerformance() {
+    const msgEl     = document.getElementById("perf-message");
+    const contentEl = document.getElementById("perf-content");
+    const statsEl   = document.getElementById("perf-stats");
+    if (!msgEl) return;
+
+    msgEl.style.display     = "none";
+    contentEl.style.display = "";
+
+    try {
+        const resp = await fetch("/api/performance");
+        if (!resp.ok) throw new Error(resp.statusText);
+        const data = await resp.json();
+
+        if (data.status === "insufficient_data") {
+            const d = data.days || 0;
+            msgEl.innerHTML = `
+                <div style="font-size:1.8rem;margin-bottom:10px">📈</div>
+                Building history — <strong style="color:#c9d1d9">${d} day${d !== 1 ? "s" : ""}</strong> recorded.<br>
+                Benchmarks will appear once at least 2 days of portfolio data have been collected.<br>
+                <span style="font-size:0.75rem;color:#30363d;margin-top:8px;display:block">
+                    The dashboard records a snapshot each time the portfolio loads.
+                </span>`;
+            msgEl.style.display     = "block";
+            contentEl.style.display = "none";
+            return;
+        }
+
+        if (data.error) {
+            msgEl.innerHTML     = `<span style="color:#f85149">${esc(data.error)}</span>`;
+            msgEl.style.display = "block";
+            contentEl.style.display = "none";
+            return;
+        }
+
+        const range  = document.getElementById("perf-range").value;
+        const cutoff = getPerfCutoff(range);
+        const port   = perfFilterRebase(data.portfolio, cutoff);
+        const spy    = perfFilterRebase(data.spy,       cutoff);
+        const qqq    = perfFilterRebase(data.qqq,       cutoff);
+
+        if (!port.length && !spy.length && !qqq.length) {
+            msgEl.textContent   = "No data in the selected range.";
+            msgEl.style.display = "block";
+            contentEl.style.display = "none";
+            return;
+        }
+
+        // ── Stats cards ──────────────────────────────────────────────────────
+        const portRet = (port.at(-1)?.value ?? 100) - 100;
+        const spyRet  = (spy.at(-1)?.value  ?? 100) - 100;
+        const qqqRet  = (qqq.at(-1)?.value  ?? 100) - 100;
+
+        function retColor(v)  { return v >= 0 ? "#3fb950" : "#f85149"; }
+        function fmtRet(v)    { return (v >= 0 ? "+" : "") + v.toFixed(2) + "%"; }
+        function miniCard(label, val, dimLabel) {
+            const labelStyle = dimLabel ? "color:#6e7681" : "color:#8b949e";
+            return `<div style="background:#1c2128;border:1px solid #21262d;border-radius:6px;padding:10px 14px">
+                <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.5px;
+                            margin-bottom:5px;${labelStyle}">${label}</div>
+                <div style="font-size:1rem;font-weight:600;color:${retColor(val)}">${fmtRet(val)}</div>
+            </div>`;
+        }
+        function alphaCard(label, val) {
+            const sign  = val >= 0 ? "+" : "";
+            const color = val >= 0 ? "#3fb950" : "#f85149";
+            return `<div style="background:#1c2128;border:1px solid #21262d;border-radius:6px;padding:10px 14px">
+                <div style="font-size:0.68rem;color:#6e7681;text-transform:uppercase;
+                            letter-spacing:0.5px;margin-bottom:5px">${label}</div>
+                <div style="font-size:1rem;font-weight:600;color:${color}">${sign}${val.toFixed(2)}%</div>
+            </div>`;
+        }
+
+        statsEl.innerHTML =
+            miniCard("My Portfolio", portRet) +
+            miniCard("SPY (B&amp;H)", spyRet) +
+            miniCard("QQQ (B&amp;H)", qqqRet) +
+            (spy.length ? alphaCard("vs SPY", portRet - spyRet) : "") +
+            (qqq.length ? alphaCard("vs QQQ", portRet - qqqRet) : "");
+
+        // ── Chart ─────────────────────────────────────────────────────────────
+        const allDates = [...new Set([
+            ...port.map(p => p.date),
+            ...spy.map(p  => p.date),
+            ...qqq.map(p  => p.date),
+        ])].sort();
+
+        function mkMap(s) { return Object.fromEntries(s.map(p => [p.date, p.value])); }
+        const portMap = mkMap(port);
+        const spyMap  = mkMap(spy);
+        const qqqMap  = mkMap(qqq);
+
+        const n = allDates.length;
+        const ctx = document.getElementById("perf-chart").getContext("2d");
+        if (perfChart) { perfChart.destroy(); perfChart = null; }
+
+        Chart.defaults.color       = "#8b949e";
+        Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
+        Chart.defaults.font.size   = 11;
+
+        perfChart = new Chart(ctx, {
+            type: "line",
+            data: {
+                labels: allDates,
+                datasets: [
+                    {
+                        label: "My Portfolio",
+                        data: allDates.map(d => portMap[d] ?? null),
+                        borderColor: "#58a6ff",
+                        backgroundColor: "rgba(88,166,255,0.08)",
+                        fill: { value: 100, above: "rgba(88,166,255,0.07)", below: "rgba(248,81,73,0.06)" },
+                        tension: 0.3,
+                        borderWidth: 2.5,
+                        pointRadius: n > 60 ? 0 : 3,
+                        pointHoverRadius: 5,
+                        spanGaps: true,
+                        order: 1,
+                    },
+                    {
+                        label: "SPY (Buy & Hold + DRIP)",
+                        data: allDates.map(d => spyMap[d] ?? null),
+                        borderColor: "#e3b341",
+                        backgroundColor: "transparent",
+                        fill: false,
+                        tension: 0.3,
+                        borderWidth: 1.8,
+                        borderDash: [5, 4],
+                        pointRadius: 0,
+                        pointHoverRadius: 5,
+                        spanGaps: true,
+                        order: 2,
+                    },
+                    {
+                        label: "QQQ (Buy & Hold + DRIP)",
+                        data: allDates.map(d => qqqMap[d] ?? null),
+                        borderColor: "#3fb950",
+                        backgroundColor: "transparent",
+                        fill: false,
+                        tension: 0.3,
+                        borderWidth: 1.8,
+                        borderDash: [5, 4],
+                        pointRadius: 0,
+                        pointHoverRadius: 5,
+                        spanGaps: true,
+                        order: 3,
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: "top",
+                        align: "start",
+                        labels: { boxWidth: 24, boxHeight: 2, padding: 20 },
+                    },
+                    tooltip: {
+                        backgroundColor: "#1c2128",
+                        borderColor: "#30363d",
+                        borderWidth: 1,
+                        titleColor: "#c9d1d9",
+                        bodyColor: "#8b949e",
+                        padding: 10,
+                        callbacks: {
+                            title: items => items[0]?.label ?? "",
+                            label: item => {
+                                const v = item.parsed.y;
+                                if (v == null) return null;
+                                const ret  = v - 100;
+                                const sign = ret >= 0 ? "+" : "";
+                                return `  ${item.dataset.label}: ${sign}${ret.toFixed(2)}%`;
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: {
+                        grid: { color: "#21262d" },
+                        ticks: { maxTicksLimit: 8, maxRotation: 0 },
+                    },
+                    y: {
+                        grid: { color: "#21262d" },
+                        ticks: {
+                            callback: v => {
+                                const r = v - 100;
+                                return (r >= 0 ? "+" : "") + r.toFixed(0) + "%";
+                            },
+                        },
+                    },
+                },
+            },
+        });
+
+    } catch (e) {
+        msgEl.innerHTML     = `<span style="color:#f85149">Failed to load performance: ${esc(e.message)}</span>`;
+        msgEl.style.display = "block";
+        contentEl.style.display = "none";
+    }
+}
+
+function getPerfCutoff(range) {
+    const now = new Date();
+    if (range === "all") return "0000-00-00";
+    if (range === "ytd") return `${now.getFullYear()}-01-01`;
+    const d = new Date(now - parseInt(range, 10) * 86400000);
+    return d.toISOString().slice(0, 10);
+}
+
+function perfFilterRebase(series, cutoff) {
+    const fil = series.filter(p => p.date >= cutoff);
+    if (!fil.length) return [];
+    const base = fil[0].value;
+    return fil.map(p => ({ date: p.date, value: +(p.value / base * 100).toFixed(4) }));
+}
+
 // ── Controls ─────────────────────────────────────────────────────────────────
 async function disableWorkflow() {
     if (!confirm("Pause the daily automation?\n\nNo trades will run until you resume it.")) return;
@@ -1033,9 +1303,10 @@ function resetCountdown() {
 }
 
 async function loadAll() {
-    await Promise.all([loadRuns(), loadWorkflowState(), loadPortfolio()]);
+    await Promise.all([loadRuns(), loadWorkflowState(), loadPortfolio(), loadPerformance()]);
     const now = new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     document.getElementById("last-refreshed").textContent = "Updated " + now;
+    document.getElementById("last-refreshed").style.color = "#30363d";
     resetCountdown();
 }
 

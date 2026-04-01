@@ -10,24 +10,30 @@ Setup:
   2. Add to your .env file:
        GITHUB_PAT=ghp_your_token_here
        GITHUB_REPO=Loudlarry/trade-manager
+       DASHBOARD_PASSWORD=choose_a_strong_password
   3. Install deps:  pip install -r requirements-dashboard.txt
   4. Run:           python dashboard.py
-  5. Open:          http://localhost:5000
+  5. Open:          http://<your-ip>:5000
 
-Security: The server binds to 127.0.0.1 (localhost only).
-Your PAT is never sent to the browser — all GitHub API calls are
+Security: Set DASHBOARD_PASSWORD in .env before exposing this to a network.
+Your PAT and API keys are never sent to the browser — all API calls are
 made server-side here in Python.
 """
 
+from datetime import datetime, timedelta
+import base64
 import io
 import json
 import os
 import re
+import secrets
 import zipfile
+
+import yfinance as yf
 
 import requests
 from dotenv import load_dotenv, set_key
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
 load_dotenv()
 
@@ -36,9 +42,43 @@ GITHUB_REPO: str = os.getenv("GITHUB_REPO", "Loudlarry/trade-manager")
 WORKFLOW_FILE: str = "daily-rebalance.yml"
 GITHUB_BRANCH: str = "master"
 DOTENV_PATH: str   = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+HISTORY_PATH: str  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "portfolio_history.json")
 TICKER_RE          = re.compile(r"^[A-Z0-9.\-]{1,10}$")
+DASHBOARD_PASSWORD: str = os.getenv("DASHBOARD_PASSWORD", "")
 
 app = Flask(__name__)
+
+
+def _get_or_create_secret_key() -> str:
+    """Return FLASK_SECRET_KEY from env, generating one if absent.
+    On hosted platforms (Render etc.) set FLASK_SECRET_KEY as an env var
+    so sessions survive restarts.
+    """
+    key = os.getenv("FLASK_SECRET_KEY", "")
+    if not key:
+        key = secrets.token_hex(32)
+        try:
+            set_key(DOTENV_PATH, "FLASK_SECRET_KEY", key)
+        except Exception:
+            pass  # .env may not exist on hosted platforms — key works in-memory only
+        os.environ["FLASK_SECRET_KEY"] = key
+    return key
+
+
+app.secret_key = _get_or_create_secret_key()
+
+
+@app.before_request
+def _require_auth():
+    """Redirect to /login when DASHBOARD_PASSWORD is set and the session is not authenticated."""
+    if not DASHBOARD_PASSWORD:
+        return  # no password configured — open access (local use)
+    if request.endpoint in ("login", "logout", "static"):
+        return
+    if not session.get("authenticated"):
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "Unauthorized"}), 401
+        return redirect(url_for("login", next=request.path))
 
 
 # ── GitHub API helpers ────────────────────────────────────────────────────────
@@ -68,11 +108,141 @@ def _gh_post(path: str, payload: dict) -> None:
     requests.post(url, headers=_headers(), json=payload, timeout=15).raise_for_status()
 
 
+def _gh_read_repo_file(repo_path: str) -> tuple:
+    """Read a file from the GitHub repo. Returns (content_str, sha) or (None, None)."""
+    if not GITHUB_PAT:
+        return None, None
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{repo_path}"
+        resp = requests.get(url, headers=_headers(), timeout=15,
+                            params={"ref": GITHUB_BRANCH})
+        if resp.status_code == 404:
+            return None, None
+        resp.raise_for_status()
+        data = resp.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        return content, data["sha"]
+    except Exception:
+        return None, None
+
+
+def _gh_write_repo_file(repo_path: str, content: str, sha, message: str) -> bool:
+    """Commit a file to the GitHub repo. Returns True on success."""
+    if not GITHUB_PAT:
+        return False
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        "branch": GITHUB_BRANCH,
+    }
+    if sha:
+        payload["sha"] = sha
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{repo_path}"
+        resp = requests.put(url, headers=_headers(), json=payload, timeout=20)
+        resp.raise_for_status()
+        return True
+    except Exception:
+        return False
+
+
+# ── Portfolio history helpers ─────────────────────────────────────────────────
+
+def _load_history_and_sha() -> tuple:
+    """Load portfolio_history.json. GitHub API is authoritative (persists on hosted
+    platforms); falls back to local file for pure-local usage."""
+    raw, sha = _gh_read_repo_file("portfolio_history.json")
+    if raw is not None:
+        try:
+            return json.loads(raw), sha
+        except json.JSONDecodeError:
+            pass
+    # Local fallback
+    try:
+        with open(HISTORY_PATH, encoding="utf-8") as f:
+            return json.load(f), None
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}, None
+
+
+def _load_history() -> dict:
+    return _load_history_and_sha()[0]
+
+
+def _append_history(date_str: str, total_value: float) -> None:
+    history, sha = _load_history_and_sha()
+    if date_str in history:
+        return  # Already recorded today — skip to avoid unnecessary GitHub commits
+    history[date_str] = round(total_value, 2)
+    content = json.dumps(dict(sorted(history.items())), indent=2)
+    # Try GitHub first (persists across restarts on hosted platforms)
+    if _gh_write_repo_file("portfolio_history.json", content, sha,
+                           f"[dashboard] portfolio snapshot {date_str}"):
+        return
+    # Fall back to local file
+    tmp = HISTORY_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, HISTORY_PATH)
+    except OSError:
+        pass  # Best-effort — silently skip if filesystem is read-only
+
+
+def _yahoo_adj_close(ticker: str, start_dt: datetime, end_dt: datetime) -> list:
+    """Fetch daily adjusted-close prices via yfinance (handles Yahoo auth automatically).
+
+    Adjusted close is equivalent to a total-return / DRIP series: dividends are
+    folded into historical prices so the return between any two adjusted-close
+    values equals buy-and-hold with all dividends reinvested.
+    """
+    df = yf.download(
+        ticker,
+        start=start_dt.strftime("%Y-%m-%d"),
+        end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+        auto_adjust=True,
+        progress=False,
+        multi_level_index=False,
+    )
+    if df.empty:
+        return []
+    points = []
+    for idx, row in df.iterrows():
+        date  = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+        price = float(row["Close"])
+        if price and price == price:  # skip NaN
+            points.append({"date": date, "price": price})
+    return points
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
     return render_template("dashboard.html", repo=GITHUB_REPO)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error = None
+    if request.method == "POST":
+        pw = request.form.get("password", "")
+        if DASHBOARD_PASSWORD and secrets.compare_digest(pw, DASHBOARD_PASSWORD):
+            session["authenticated"] = True
+            session.permanent = True
+            dest = request.args.get("next") or url_for("index")
+            # Guard against open-redirect: only allow relative paths
+            if not dest.startswith("/") or dest.startswith("//"):
+                dest = url_for("index")
+            return redirect(dest)
+        error = "Incorrect password."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 @app.route("/api/runs")
@@ -176,11 +346,20 @@ def api_config_post():
 
 @app.route("/api/targets")
 def api_targets_get():
-    """Return current targets.json as a plain dict."""
+    """Return current targets.json — reads from GitHub repo (authoritative source)."""
+    raw, _ = _gh_read_repo_file("targets.json")
+    if raw is not None:
+        try:
+            data = json.loads(raw)
+            return jsonify({k: v for k, v in data.items() if not k.startswith("_")})
+        except json.JSONDecodeError:
+            pass
+    # Local fallback (pure-local usage without GitHub API)
     targets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "targets.json")
     try:
         with open(targets_path, encoding="utf-8") as f:
-            return jsonify(json.load(f))
+            data = json.load(f)
+            return jsonify({k: v for k, v in data.items() if not k.startswith("_")})
     except FileNotFoundError:
         return jsonify({}), 200
 
@@ -212,11 +391,17 @@ def api_targets_post():
     if not clean:
         return jsonify({"error": "No non-zero targets provided."}), 400
 
-    # Atomic write: .tmp then replace
+    content = json.dumps(clean, indent=2)
+    # Commit to GitHub repo (persists on hosted platforms + keeps version history)
+    _, sha = _gh_read_repo_file("targets.json")
+    if _gh_write_repo_file("targets.json", content, sha, "[dashboard] update target weights"):
+        return jsonify({"ok": True, "saved": clean})
+    # Fall back to local file
+    targets_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "targets.json")
     tmp_path = targets_path + ".tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(clean, f, indent=2)
+            f.write(content)
         os.replace(tmp_path, targets_path)
     except OSError as e:
         return jsonify({"error": f"Failed to save: {e}"}), 500
@@ -274,12 +459,21 @@ def api_portfolio():
 
         total = sum(holdings.values()) + cash
 
-        # Step 4: Load targets
-        targets_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "targets.json"
-        )
-        with open(targets_path, encoding="utf-8") as f:
-            targets = json.load(f)
+        # Step 4: Load targets from GitHub repo (authoritative source)
+        raw_targets, _ = _gh_read_repo_file("targets.json")
+        if raw_targets is not None:
+            try:
+                all_targets = json.loads(raw_targets)
+                targets = {k: v for k, v in all_targets.items() if not k.startswith("_")}
+            except json.JSONDecodeError:
+                targets = {}
+        else:
+            targets_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "targets.json"
+            )
+            with open(targets_path, encoding="utf-8") as f:
+                all_targets = json.load(f)
+                targets = {k: v for k, v in all_targets.items() if not k.startswith("_")}
 
         # Step 5: Build comparison rows (union of held and targeted tickers)
         rows = []
@@ -297,6 +491,9 @@ def api_portfolio():
 
         rows.sort(key=lambda x: (-x["target_weight"], x["ticker"]))
 
+        # Record daily portfolio value snapshot for performance tracking
+        _append_history(datetime.now().strftime("%Y-%m-%d"), total)
+
         return jsonify({
             "total_value": round(total, 2),
             "cash":        round(cash, 2),
@@ -307,10 +504,51 @@ def api_portfolio():
     except requests.HTTPError as e:
         code = e.response.status_code if e.response is not None else 0
         return jsonify({"error": f"Public API HTTP {code}: {e}"}), 502
-    except FileNotFoundError:
-        return jsonify({"error": "targets.json not found"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/performance")
+def api_performance():
+    """Return normalized portfolio vs SPY/QQQ performance series for charting."""
+    history      = _load_history()
+    sorted_dates = sorted(history.keys())
+    if len(sorted_dates) < 2:
+        return jsonify({"status": "insufficient_data", "days": len(sorted_dates)})
+
+    start_date = sorted_dates[0]
+    start_dt   = datetime.strptime(start_date, "%Y-%m-%d")
+    # Pad back 2 days so yfinance is sure to include data on start_date
+    fetch_from = start_dt - timedelta(days=2)
+    fetch_to   = datetime.now()
+
+    try:
+        spy_raw = _yahoo_adj_close("SPY", fetch_from, fetch_to)
+        qqq_raw = _yahoo_adj_close("QQQ", fetch_from, fetch_to)
+    except Exception as e:
+        return jsonify({"error": f"Benchmark fetch failed: {e}"}), 502
+
+    port_start       = history[sorted_dates[0]]
+    portfolio_series = [
+        {"date": d, "value": round(history[d] / port_start * 100, 4)}
+        for d in sorted_dates
+    ]
+
+    def normalize_series(raw, anchor_date):
+        anchor = next((pt["price"] for pt in raw if pt["date"] >= anchor_date), None)
+        if not anchor:
+            return []
+        return [
+            {"date": pt["date"], "value": round(pt["price"] / anchor * 100, 4)}
+            for pt in raw if pt["date"] >= anchor_date
+        ]
+
+    return jsonify({
+        "start_date": start_date,
+        "portfolio":  portfolio_series,
+        "spy":        normalize_series(spy_raw, start_date),
+        "qqq":        normalize_series(qqq_raw, start_date),
+    })
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -326,5 +564,11 @@ if __name__ == "__main__":
             "Required scopes: repo  (or: actions:read + actions:write)\n"
         )
         raise SystemExit(1)
-    print(f"\nEMS Dashboard → http://localhost:5000   (repo: {GITHUB_REPO})\n")
-    app.run(debug=False, host="127.0.0.1", port=5000)
+    port = int(os.getenv("PORT", 5000))
+    print(f"\nEMS Dashboard \u2192 http://0.0.0.0:{port}   (repo: {GITHUB_REPO})")
+    if DASHBOARD_PASSWORD:
+        print("Auth: DASHBOARD_PASSWORD is set \u2014 login required.")
+    else:
+        print("WARNING: DASHBOARD_PASSWORD not set \u2014 add it to .env before exposing to a network.")
+    print()
+    app.run(debug=False, host="0.0.0.0", port=port)

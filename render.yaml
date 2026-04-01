@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: ems-trade-manager
+    env: python
+    buildCommand: pip install -r requirements-dashboard.txt
+    startCommand: gunicorn dashboard:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
+    envVars:
+      - key: FLASK_SECRET_KEY
+        generateValue: true          # Render auto-generates a stable random value
+      - key: GITHUB_PAT
+        sync: false                  # Set this in the Render dashboard
+      - key: GITHUB_REPO
+        sync: false                  # e.g. Loudlarry/trade-manager
+      - key: DASHBOARD_PASSWORD
+        sync: false                  # Password to protect the web UI
+      - key: PUBLIC_SECRET_KEY
+        sync: false                  # Public.com API secret key
