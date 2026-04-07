@@ -758,12 +758,19 @@ def execute_trades(
             returned_order_id = response.get("orderId", "N/A")
             log.info("  ✓ submitted orderId=%s", returned_order_id)
         except requests.HTTPError as exc:
+            body = ""
+            if exc.response is not None:
+                try:
+                    body = exc.response.json()
+                except Exception:
+                    body = exc.response.text
             log.error(
-                "  ✗ HTTP %s placing %s %s: %s",
+                "  ✗ HTTP %s placing %s %s: %s | response: %s",
                 exc.response.status_code if exc.response is not None else "?",
                 order.side,
                 order.ticker,
                 exc,
+                body,
             )
         except requests.RequestException as exc:
             log.error(
