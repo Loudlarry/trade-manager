@@ -1,18 +1,18 @@
 {
   "_comment": "Target portfolio weights. Must sum to <= 1.0. Remainder stays as cash.",
-  "VST": 0.12,
-  "BAH": 0.10,
-  "MA": 0.08,
-  "NEM": 0.08,
-  "DRS": 0.075,
-  "TMO": 0.075,
-  "MTDR": 0.07,
-  "LLY": 0.065,
-  "HRB": 0.065,
-  "OKTA": 0.06,
-  "ZION": 0.04,
-  "PEG": 0.05,
-  "APO": 0.045,
-  "HALO": 0.045,
-  "SCI": 0.02
+  "MSFT": 0.1188,
+  "AVGO": 0.0990,
+  "LLY": 0.0693,
+  "VST": 0.0693,
+  "AMTM": 0.0693,
+  "GD": 0.0693,
+  "MU": 0.0693,
+  "OKTA": 0.0594,
+  "ABBV": 0.0594,
+  "NOC": 0.0594,
+  "DVN": 0.0594,
+  "VZ": 0.0495
+  "UHS": 0.0495,
+  "CME": 0.0495,
+  "PSN": 0.0396
 }
