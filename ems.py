@@ -104,7 +104,12 @@ class AccountState:
     total_value: float          # Full portfolio value (cash + positions)
     cash_balance: float         # Uninvested cash (cashOnlyBuyingPower)
     holdings: dict[str, float]  # {ticker: current_dollar_value}
+    share_quantities: dict[str, float] = None  # {ticker: share_count} from portfolio
     open_orders_count: int = 0  # Pending/open orders at snapshot time
+
+    def __post_init__(self):
+        if self.share_quantities is None:
+            self.share_quantities = {}
 
 
 @dataclass
@@ -117,6 +122,7 @@ class Order:
     target_weight: float
     current_weight: float
     drift: float        # current_weight − target_weight (signed)
+    quantity: float = 0.0  # share count; >0 means use quantity order (full-exit sells)
 
 
 # ─────────────────────────── Public.com API Client ───────────────────────────
@@ -284,6 +290,7 @@ class PublicAPIClient:
         dollar_amount: float,
         last_price: Optional[float] = None,
         current_value: float = 0.0,
+        quantity: float = 0.0,
     ) -> dict:
         """
         POST /userapigateway/trading/{accountId}/order
@@ -317,6 +324,17 @@ class PublicAPIClient:
                 "timeInForce": "DAY",
             },
         }
+
+        # Full-exit sells: use quantity order to avoid API code-123 rejection.
+        # The API rejects dollar-amount orders whose value equals the entire
+        # position ("too close to the position's market value").
+        if quantity and quantity > 0 and side.upper() == "SELL" and ticker.upper() not in NON_FRACTIONAL:
+            payload["quantity"] = str(quantity)
+            log.info(
+                "  %-8s  full-exit: using quantity order (%.6g shares)",
+                ticker, quantity,
+            )
+            return self._post(f"/{account_id}/order", payload)
 
         if ticker.upper() in NON_FRACTIONAL:
             if last_price is None or last_price <= 0:
@@ -490,12 +508,17 @@ def get_account_state(client: PublicAPIClient) -> AccountState:
     holdings: dict[str, float] = {}
     invested_value = 0.0
 
+    share_quantities: dict[str, float] = {}
+
     for pos in positions:
         ticker = pos["instrument"]["symbol"].upper()
         current_value = float(pos["currentValue"])
         holdings[ticker] = current_value
         invested_value += current_value
-        log.info("  Holding %-8s : $%.2f", ticker, current_value)
+        qty = float(pos.get("quantity", 0))
+        if qty:
+            share_quantities[ticker] = qty
+        log.info("  Holding %-8s : $%.2f (%.6g shares)", ticker, current_value, qty)
 
     if not holdings:
         log.warning("No open positions found in portfolio.")
@@ -527,6 +550,7 @@ def get_account_state(client: PublicAPIClient) -> AccountState:
         total_value=total_value,
         cash_balance=cash_balance,
         holdings=holdings,
+        share_quantities=share_quantities,
         open_orders_count=open_orders_count,
     )
 
@@ -646,6 +670,13 @@ def calculate_orders(
             )
             continue
 
+        # For full exits, record share count so place_order can use a
+        # quantity order — the API rejects dollar-amount orders that equal
+        # the entire position value (code 123).
+        full_exit_qty = 0.0
+        if is_full_exit:
+            full_exit_qty = state.share_quantities.get(ticker, 0.0)
+
         order = Order(
             ticker=ticker,
             side="SELL" if delta < 0 else "BUY",
@@ -654,6 +685,7 @@ def calculate_orders(
             target_weight=target_weight,
             current_weight=current_weight,
             drift=drift,
+            quantity=full_exit_qty,
         )
 
         if order.side == "SELL":
@@ -751,6 +783,7 @@ def execute_trades(
                 dollar_amount=order.dollar_amount,
                 last_price=last_price,
                 current_value=order.current_value,
+                quantity=order.quantity,
             )
             if not response:
                 # place_order returns {} when whole_shares == 0
