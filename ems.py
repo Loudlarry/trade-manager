@@ -25,6 +25,7 @@ import math
 import os
 import sys
 import uuid
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -70,6 +71,11 @@ NON_FRACTIONAL: set[str] = {
 
 # Path to the targets file (relative to this script).
 TARGETS_FILE: Path = Path(__file__).parent / "targets.json"
+
+# Key inside targets.json that records the weights from the last applied run.
+# Any ticker whose current target differs from this value bypasses the drift
+# gate — ensuring deliberate weight changes are always executed.
+_APPLIED_KEY = "_applied"
 
 # ─────────────────────────── Logging Setup ───────────────────────────────────
 
@@ -358,14 +364,18 @@ class PublicAPIClient:
 # ─────────────────────────── Core Functions ──────────────────────────────────
 
 
-def load_targets() -> dict[str, float]:
+def load_targets() -> tuple[dict[str, float], dict[str, float]]:
     """
     Load desired portfolio weights from targets.json.
 
     File format:
         { "NVDA": 0.15, "AAPL": 0.10, "MSFT": 0.20, ... }
 
-    Weights must sum to ≤ 1.0 (remaining fraction stays as cash).
+    Also reads the "_applied" key which records the weights from the previous
+    successful run. Any ticker whose target differs from _applied bypasses the
+    drift gate, ensuring deliberate weight changes are always executed.
+
+    Returns (targets, applied_targets).
     Raises on missing file, bad JSON, or weights that exceed 1.0.
     """
     log.info("Loading targets from %s", TARGETS_FILE)
@@ -375,6 +385,12 @@ def load_targets() -> dict[str, float]:
 
     with TARGETS_FILE.open("r", encoding="utf-8") as fh:
         raw = json.load(fh)
+
+    # Read and remove the _applied snapshot before further processing
+    applied_raw: dict = raw.get(_APPLIED_KEY, {})
+    applied_targets: dict[str, float] = {
+        k.upper(): float(v) for k, v in applied_raw.items()
+    }
 
     # Strip internal comment keys (keys starting with "_")
     data = {k: v for k, v in raw.items() if not k.startswith("_")}
@@ -422,9 +438,15 @@ def load_targets() -> dict[str, float]:
         total * 100,
     )
     for ticker, w in targets.items():
-        log.info("  %-8s → target weight %.2f%%", ticker, w * 100)
+        prev_w = applied_targets.get(ticker)
+        changed = prev_w is None or abs(prev_w - w) > 1e-9
+        marker = " [CHANGED]" if changed else ""
+        log.info("  %-8s → target weight %.2f%%%s", ticker, w * 100, marker)
 
-    return targets
+    if not applied_targets:
+        log.info("No _applied snapshot found — drift gate bypassed for all tickers this run.")
+
+    return targets, applied_targets
 
 
 def get_account_state(client: PublicAPIClient) -> AccountState:
@@ -512,6 +534,7 @@ def get_account_state(client: PublicAPIClient) -> AccountState:
 def calculate_orders(
     targets: dict[str, float],
     state: AccountState,
+    applied_targets: dict[str, float] | None = None,
 ) -> list[Order]:
     """
     Core rebalancing logic.
@@ -523,6 +546,8 @@ def calculate_orders(
          Exceptions (always bypasses drift gate):
            - New entry: in targets.json but not yet held → always buy.
            - Full exit: removed from targets.json but still held → always sell.
+           - Target changed: target weight differs from the last applied run
+             → always trade to the new target regardless of drift size.
       4. Generate sell orders first (to free cash), then buy orders.
       5. Skip any order whose absolute dollar amount < MIN_ORDER_DOLLARS.
 
@@ -571,18 +596,28 @@ def calculate_orders(
         )
 
         # ── Drift gate ────────────────────────────────────────────────────
-        # Two intentional-action exceptions that always bypass the drift gate:
+        # Three cases that always bypass the drift gate:
         #
         # 1. Full exit: ticker removed from targets.json (target = 0%) but we
         #    still hold it → always sell the full position regardless of size.
         # 2. New entry: ticker added to targets.json but we hold none of it
         #    (current = 0%) → always open the position regardless of target size.
+        # 3. Target changed: the target weight for this ticker was deliberately
+        #    updated since the last successful run (differs from _applied) →
+        #    always trade to honor the new weight even if drift is small.
         #
-        # Both represent deliberate portfolio decisions, not drift noise.
-        is_full_exit = target_weight == 0.0 and current_value > 0.0
-        is_new_entry = current_value == 0.0 and target_weight > 0.0
+        # Cases 1 and 2 represent deliberate portfolio decisions.
+        # Case 3 ensures manual weight edits are always executed immediately.
+        is_full_exit    = target_weight == 0.0 and current_value > 0.0
+        is_new_entry    = current_value == 0.0 and target_weight > 0.0
+        prev_target     = (applied_targets or {}).get(ticker)
+        target_changed  = (
+            applied_targets is not None
+            and (prev_target is None or abs((prev_target or 0.0) - target_weight) > 1e-9)
+        )
 
-        if not is_full_exit and not is_new_entry and abs(drift) <= DRIFT_THRESHOLD:
+        if not is_full_exit and not is_new_entry and not target_changed \
+                and abs(drift) <= DRIFT_THRESHOLD:
             log.info(
                 "%-8s  SKIP  |drift| %.2f%% ≤ threshold %.2f%%",
                 ticker,
@@ -590,6 +625,13 @@ def calculate_orders(
                 DRIFT_THRESHOLD * 100,
             )
             continue
+
+        if target_changed and not is_full_exit and not is_new_entry:
+            prev_pct = f"{prev_target * 100:.2f}%" if prev_target is not None else "(new)"
+            log.info(
+                "%-8s  TARGET CHANGED %s → %.2f%% — bypassing drift gate",
+                ticker, prev_pct, target_weight * 100,
+            )
 
         # ── Dollar delta ─────────────────────────────────────────────────
         target_value = target_weight * investable_value
@@ -735,6 +777,48 @@ def execute_trades(
 # ─────────────────────────── Orchestrator ────────────────────────────────────
 
 
+def _update_applied_targets(targets: dict[str, float]) -> None:
+    """Persist the successfully applied targets back into targets.json under
+    the '_applied' key so the next run can detect deliberate weight changes.
+
+    On GitHub Actions the filesystem is ephemeral, so we commit the update
+    back to the repo via the GitHub API. Falls back to a local write if the
+    env vars are absent (pure-local usage).
+    """
+    try:
+        with TARGETS_FILE.open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        raw = {}
+
+    raw[_APPLIED_KEY] = targets  # record exactly what was applied
+    content = json.dumps(raw, indent=2)
+
+    gh_token = os.getenv("GITHUB_PAT", "")
+    gh_repo  = os.getenv("GITHUB_REPO", "")
+    gh_branch = os.getenv("GITHUB_BRANCH", "master")
+
+    if gh_token and gh_repo:
+        _, sha = _gh_read_file(gh_repo, "targets.json", gh_branch, gh_token)
+        ok = _gh_write_file(
+            gh_repo, "targets.json", gh_branch, gh_token,
+            content, sha, "[ems] update _applied target weights"
+        )
+        if ok:
+            log.info("_applied targets committed to GitHub repo.")
+            return
+        log.warning("GitHub commit failed — falling back to local write.")
+
+    try:
+        tmp = str(TARGETS_FILE) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp, str(TARGETS_FILE))
+        log.info("_applied targets saved locally.")
+    except OSError as exc:
+        log.warning("Could not save _applied targets: %s", exc)
+
+
 def run() -> None:
     """
     Main orchestration function.
@@ -772,7 +856,7 @@ def run() -> None:
         client.authenticate()
 
         # Step 2: Load target weights
-        targets = load_targets()
+        targets, applied_targets = load_targets()
 
         # Step 3: Fetch live account state (discovers accountId internally)
         state = get_account_state(client)
@@ -789,7 +873,7 @@ def run() -> None:
             sys.exit(1)
 
         # Step 5: Calculate drift-gated orders
-        orders = calculate_orders(targets, state)
+        orders = calculate_orders(targets, state, applied_targets)
 
         # Step 6: Execute or dry-run
         if DRY_RUN:
@@ -828,6 +912,10 @@ def run() -> None:
                     sells_total,
                 )
             execute_trades(orders, client, account_id=state.account_id)
+
+            # ── Persist applied targets so next run knows what was last executed ──
+            # Re-read targets.json raw to preserve any existing keys (_comment etc.)
+            _update_applied_targets(targets)
 
     except FileNotFoundError as exc:
         log.critical("Configuration error: %s", exc)
