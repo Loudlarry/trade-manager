@@ -6,11 +6,14 @@ on:
     - cron: "0 14 * * 1-5"
 
   # Allows you to trigger a run manually from the GitHub Actions tab.
-  # Pass deploy_only=true to skip the EMS and just redeploy the dashboard.
   workflow_dispatch:
     inputs:
       deploy_only:
         description: "Skip EMS, deploy dashboard only"
+        required: false
+        default: "false"
+      force_rebalance:
+        description: "Bypass drift gate and rebalance all positions to target weights (use after editing targets.json)"
         required: false
         default: "false"
 
@@ -47,6 +50,11 @@ jobs:
           # Go to: Settings → Secrets and variables → Actions → Variables → New
           # Name: EMS_DRY_RUN  Value: false
           EMS_DRY_RUN: ${{ vars.EMS_DRY_RUN }}
+          # Set via the manual trigger "force_rebalance" input — bypasses the
+          # drift gate so every position is sized to its exact target weight.
+          # Only takes effect when you manually run the workflow and tick it.
+          # Scheduled (daily) runs always leave this as false.
+          EMS_FORCE_REBALANCE: ${{ github.event.inputs.force_rebalance || 'false' }}
         run: python ems.py
 
       # 5. Upload the log file as a downloadable artifact (kept for 7 days).
