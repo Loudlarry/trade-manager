@@ -418,6 +418,10 @@
             <option value="30">30d</option>
         </select>
         <button class="btn-secondary" onclick="loadPerformance()" style="padding:4px 10px;font-size:0.75rem">↻ Refresh</button>
+        <button class="btn-secondary" id="btn-backfill" onclick="backfillHistory()"
+                style="padding:4px 10px;font-size:0.75rem" title="Reconstruct past history from current share counts + Yahoo Finance prices">
+            ⬇ Backfill history
+        </button>
     </div>
 </div>
 
@@ -432,7 +436,7 @@
             <canvas id="perf-chart"></canvas>
         </div>
         <div style="font-size:0.70rem;color:#30363d;margin-top:10px;text-align:right">
-            History recorded daily when dashboard loads · Benchmarks via Yahoo Finance (adjusted close)
+            Daily snapshots recorded on each EMS run · Benchmarks via Yahoo Finance (adjusted close)
         </div>
     </div>
 </div>
@@ -1233,6 +1237,31 @@ function perfFilterRebase(series, cutoff) {
     if (!fil.length) return [];
     const base = fil[0].value;
     return fil.map(p => ({ date: p.date, value: +(p.value / base * 100).toFixed(4) }));
+}
+
+async function backfillHistory() {
+    const btn = document.getElementById("btn-backfill");
+    btn.disabled = true;
+    btn.textContent = "⏳ Backfilling…";
+    try {
+        const r = await fetch("/api/backfill", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ days: 365 }),
+        });
+        const data = await r.json();
+        if (!r.ok || data.error) throw new Error(data.error || r.statusText);
+        if (data.added === 0) {
+            toast(data.message || "History already up to date.", "#d29922");
+        } else {
+            toast(`Backfilled ${data.added} days of history.`, "#3fb950");
+            await loadPerformance();
+        }
+    } catch (e) {
+        toast("Backfill failed: " + e.message, "#f85149");
+    }
+    btn.disabled = false;
+    btn.textContent = "⬇ Backfill history";
 }
 
 // ── Controls ─────────────────────────────────────────────────────────────────

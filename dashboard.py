@@ -307,8 +307,127 @@ def api_logs(run_id: int):
     return jsonify({"log": "No log artifact found for this run."})
 
 
-@app.route("/api/disable", methods=["POST"])
-def api_disable():
+@app.route("/api/backfill", methods=["POST"])
+def api_backfill():
+    """Reconstruct historical portfolio values using current share quantities
+    and yfinance historical prices.
+
+    Method: for each day in the requested window, portfolio value =
+      sum(shares_i * adjusted_close_i) + current_cash_balance
+    Cash is held constant (deposits/withdrawals are not modelled). This gives
+    a good-enough performance approximation for the chart.
+    Existing history entries are never overwritten.
+    """
+    secret = os.getenv("PUBLIC_SECRET_KEY", "")
+    if not secret:
+        return jsonify({"error": "PUBLIC_SECRET_KEY not set in .env"}), 503
+
+    days = request.get_json(force=True, silent=True) or {}
+    lookback = int(days.get("days", 365))
+
+    try:
+        # ── 1. Auth ───────────────────────────────────────────────────────
+        auth_resp = requests.post(
+            "https://api.public.com/userapiauthservice/personal/access-tokens",
+            json={"validityInMinutes": 60, "secret": secret},
+            timeout=15,
+        )
+        auth_resp.raise_for_status()
+        token = auth_resp.json()["accessToken"]
+        api_hdrs = {"Authorization": f"Bearer {token}"}
+
+        # ── 2. Account ────────────────────────────────────────────────────
+        acc_resp = requests.get(
+            "https://api.public.com/userapigateway/trading/account",
+            headers=api_hdrs, timeout=15,
+        )
+        acc_resp.raise_for_status()
+        accounts = acc_resp.json().get("accounts", [])
+        if not accounts:
+            return jsonify({"error": "No accounts found"}), 502
+        account_id = next(
+            (a["accountId"] for a in accounts if a.get("accountType") == "BROKERAGE"),
+            accounts[0]["accountId"],
+        )
+
+        # ── 3. Current portfolio (share quantities + cash) ────────────────
+        port_resp = requests.get(
+            f"https://api.public.com/userapigateway/trading/{account_id}/portfolio/v2",
+            headers=api_hdrs, timeout=20,
+        )
+        port_resp.raise_for_status()
+        portfolio = port_resp.json()
+
+        cash = float(portfolio.get("buyingPower", {}).get("cashOnlyBuyingPower", 0))
+        positions = {}   # {ticker: share_count}
+        for pos in portfolio.get("positions", []):
+            ticker = pos["instrument"]["symbol"].upper()
+            qty = float(pos.get("quantity", 0))
+            if qty:
+                positions[ticker] = qty
+
+        if not positions:
+            return jsonify({"error": "No open positions to reconstruct history from."}), 400
+
+        # ── 4. Fetch price history for all tickers ────────────────────────
+        end_dt   = datetime.now()
+        start_dt = end_dt - timedelta(days=lookback + 5)
+
+        price_series: dict[str, dict[str, float]] = {}   # {ticker: {date: price}}
+        all_dates: set[str] = set()
+
+        for ticker in positions:
+            pts = _yahoo_adj_close(ticker, start_dt, end_dt)
+            if pts:
+                price_series[ticker] = {p["date"]: p["price"] for p in pts}
+                all_dates.update(price_series[ticker].keys())
+
+        if not all_dates:
+            return jsonify({"error": "Could not fetch price history from Yahoo Finance."}), 502
+
+        # ── 5. Reconstruct daily portfolio value ──────────────────────────
+        cutoff = (end_dt - timedelta(days=lookback)).strftime("%Y-%m-%d")
+        history, sha = _load_history_and_sha()
+        added = 0
+
+        for date in sorted(all_dates):
+            if date < cutoff:
+                continue
+            if date in history:
+                continue   # never overwrite existing snapshots
+            daily_value = cash
+            for ticker, shares in positions.items():
+                price = price_series.get(ticker, {}).get(date)
+                if price:
+                    daily_value += shares * price
+            if daily_value > 0:
+                history[date] = round(daily_value, 2)
+                added += 1
+
+        if added == 0:
+            return jsonify({"ok": True, "added": 0, "message": "No new dates to add."})
+
+        content = json.dumps(dict(sorted(history.items())), indent=2)
+        saved_to = "local"
+        if _gh_write_repo_file("portfolio_history.json", content, sha,
+                               f"[dashboard] backfill {added} days of portfolio history"):
+            saved_to = "github"
+        else:
+            tmp = HISTORY_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp, HISTORY_PATH)
+
+        return jsonify({"ok": True, "added": added, "saved_to": saved_to})
+
+    except requests.HTTPError as e:
+        code = e.response.status_code if e.response is not None else 0
+        return jsonify({"error": f"Public API HTTP {code}: {e}"}), 502
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
     _gh_put(f"actions/workflows/{WORKFLOW_FILE}/disable")
     return jsonify({"ok": True})
 
