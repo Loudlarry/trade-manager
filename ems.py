@@ -45,6 +45,15 @@ load_dotenv()
 # Locally: add EMS_DRY_RUN=false to your .env file when ready.
 DRY_RUN: bool = os.getenv("EMS_DRY_RUN", "true").lower() != "false"
 
+# When True, the drift gate is bypassed for ALL tickers regardless of how
+# much prices have moved — every position is sized to its exact target weight.
+# Set to True only when you have deliberately updated targets.json and want
+# a full rebalance executed immediately.
+# In GitHub Actions: set the EMS_FORCE_REBALANCE variable to "true".
+# Locally:           add EMS_FORCE_REBALANCE=true to your .env file.
+# Leave as "false" (default) for normal daily drift-monitoring runs.
+FORCE_REBALANCE: bool = os.getenv("EMS_FORCE_REBALANCE", "false").lower() == "true"
+
 # Percentage of total account value kept uninvested at all times (covers
 # fees / margin buffer). 0.01 = 1% of total account value.
 CASH_BUFFER_PCT: float = 0.01
@@ -456,13 +465,7 @@ def load_targets() -> tuple[dict[str, float], dict[str, float]]:
         total * 100,
     )
     for ticker, w in targets.items():
-        prev_w = applied_targets.get(ticker)
-        changed = prev_w is None or abs(prev_w - w) > 1e-9
-        marker = " [CHANGED]" if changed else ""
-        log.info("  %-8s → target weight %.2f%%%s", ticker, w * 100, marker)
-
-    if not applied_targets:
-        log.info("No _applied snapshot found — drift gate bypassed for all tickers this run.")
+        log.info("  %-8s \u2192 target weight %.2f%%", ticker, w * 100)
 
     return targets, applied_targets
 
@@ -558,7 +561,6 @@ def get_account_state(client: PublicAPIClient) -> AccountState:
 def calculate_orders(
     targets: dict[str, float],
     state: AccountState,
-    applied_targets: dict[str, float] | None = None,
 ) -> list[Order]:
     """
     Core rebalancing logic.
@@ -570,8 +572,7 @@ def calculate_orders(
          Exceptions (always bypasses drift gate):
            - New entry: in targets.json but not yet held → always buy.
            - Full exit: removed from targets.json but still held → always sell.
-           - Target changed: target weight differs from the last applied run
-             → always trade to the new target regardless of drift size.
+           - FORCE_REBALANCE=true → bypass drift gate for all positions.
       4. Generate sell orders first (to free cash), then buy orders.
       5. Skip any order whose absolute dollar amount < MIN_ORDER_DOLLARS.
 
@@ -620,28 +621,22 @@ def calculate_orders(
         )
 
         # ── Drift gate ────────────────────────────────────────────────────
-        # Three cases that always bypass the drift gate:
+        # Cases that bypass the drift threshold:
         #
         # 1. Full exit: ticker removed from targets.json (target = 0%) but we
-        #    still hold it → always sell the full position regardless of size.
+        #    still hold it → always sell the full position.
         # 2. New entry: ticker added to targets.json but we hold none of it
-        #    (current = 0%) → always open the position regardless of target size.
-        # 3. Target changed: the target weight for this ticker was deliberately
-        #    updated since the last successful run (differs from _applied) →
-        #    always trade to honor the new weight even if drift is small.
+        #    (current = 0%) → always open the position.
+        # 3. FORCE_REBALANCE=true: user has deliberately updated targets.json
+        #    and wants every position sized to its exact new weight immediately.
         #
-        # Cases 1 and 2 represent deliberate portfolio decisions.
-        # Case 3 ensures manual weight edits are always executed immediately.
+        # Cases 1 and 2 always apply. Case 3 is opt-in via EMS_FORCE_REBALANCE.
         is_full_exit    = target_weight == 0.0 and current_value > 0.0
         is_new_entry    = current_value == 0.0 and target_weight > 0.0
-        prev_target     = (applied_targets or {}).get(ticker)
-        target_changed  = (
-            applied_targets is not None
-            and (prev_target is None or abs((prev_target or 0.0) - target_weight) > 1e-9)
-        )
 
-        if not is_full_exit and not is_new_entry and not target_changed \
-                and abs(drift) <= DRIFT_THRESHOLD:
+        bypass_drift = is_full_exit or is_new_entry or FORCE_REBALANCE
+
+        if not bypass_drift and abs(drift) <= DRIFT_THRESHOLD:
             log.info(
                 "%-8s  SKIP  |drift| %.2f%% ≤ threshold %.2f%%",
                 ticker,
@@ -650,11 +645,10 @@ def calculate_orders(
             )
             continue
 
-        if target_changed and not is_full_exit and not is_new_entry:
-            prev_pct = f"{prev_target * 100:.2f}%" if prev_target is not None else "(new)"
+        if FORCE_REBALANCE and not is_full_exit and not is_new_entry:
             log.info(
-                "%-8s  TARGET CHANGED %s → %.2f%% — bypassing drift gate",
-                ticker, prev_pct, target_weight * 100,
+                "%-8s  FORCE_REBALANCE — bypassing drift gate",
+                ticker,
             )
 
         # ── Dollar delta ─────────────────────────────────────────────────
@@ -874,8 +868,8 @@ def run() -> None:
     start_time = datetime.now()
     log.info("=" * 60)
     log.info("EMS run started at %s", start_time.strftime("%Y-%m-%d %H:%M:%S"))
-    log.info("DRY_RUN=%s | CASH_BUFFER=%.0f%% | DRIFT_THRESHOLD=%.0f%%",
-             DRY_RUN, CASH_BUFFER_PCT * 100, DRIFT_THRESHOLD * 100)
+    log.info("DRY_RUN=%s | FORCE_REBALANCE=%s | CASH_BUFFER=%.0f%% | DRIFT_THRESHOLD=%.0f%%",
+             DRY_RUN, FORCE_REBALANCE, CASH_BUFFER_PCT * 100, DRIFT_THRESHOLD * 100)
     log.info("=" * 60)
 
     # ── Environment ───────────────────────────────────────────────────────
@@ -896,7 +890,7 @@ def run() -> None:
         client.authenticate()
 
         # Step 2: Load target weights
-        targets, applied_targets = load_targets()
+        targets, _ = load_targets()
 
         # Step 3: Fetch live account state (discovers accountId internally)
         state = get_account_state(client)
@@ -913,7 +907,7 @@ def run() -> None:
             sys.exit(1)
 
         # Step 5: Calculate drift-gated orders
-        orders = calculate_orders(targets, state, applied_targets)
+        orders = calculate_orders(targets, state)
 
         # Step 6: Execute or dry-run
         if DRY_RUN:
