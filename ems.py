@@ -81,11 +81,6 @@ NON_FRACTIONAL: set[str] = {
 # Path to the targets file (relative to this script).
 TARGETS_FILE: Path = Path(__file__).parent / "targets.json"
 
-# Key inside targets.json that records the weights from the last applied run.
-# Any ticker whose current target differs from this value bypasses the drift
-# gate — ensuring deliberate weight changes are always executed.
-_APPLIED_KEY = "_applied"
-
 # ─────────────────────────── Logging Setup ───────────────────────────────────
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
@@ -811,46 +806,90 @@ def execute_trades(
 # ─────────────────────────── Orchestrator ────────────────────────────────────
 
 
-def _update_applied_targets(targets: dict[str, float]) -> None:
-    """Persist the successfully applied targets back into targets.json under
-    the '_applied' key so the next run can detect deliberate weight changes.
+def _append_portfolio_history(date_str: str, total_value: float) -> None:
+    """Append today's total portfolio value to portfolio_history.json.
 
-    On GitHub Actions the filesystem is ephemeral, so we commit the update
-    back to the repo via the GitHub API. Falls back to a local write if the
-    env vars are absent (pure-local usage).
+    Called after every EMS run so the performance chart in the dashboard
+    always has fresh data — even when the dashboard itself is not open.
+
+    Commits to the GitHub repo via the API (persists on hosted/ephemeral
+    runners). Falls back to a local file when GITHUB_PAT is absent.
     """
-    try:
-        with TARGETS_FILE.open("r", encoding="utf-8") as fh:
-            raw = json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError):
-        raw = {}
-
-    raw[_APPLIED_KEY] = targets  # record exactly what was applied
-    content = json.dumps(raw, indent=2)
-
-    gh_token = os.getenv("GITHUB_PAT", "")
-    gh_repo  = os.getenv("GITHUB_REPO", "")
+    gh_token  = os.getenv("GITHUB_PAT", "")
+    gh_repo   = os.getenv("GITHUB_REPO", "")
     gh_branch = os.getenv("GITHUB_BRANCH", "master")
 
-    if gh_token and gh_repo:
-        _, sha = _gh_read_file(gh_repo, "targets.json", gh_branch, gh_token)
-        ok = _gh_write_file(
-            gh_repo, "targets.json", gh_branch, gh_token,
-            content, sha, "[ems] update _applied target weights"
-        )
-        if ok:
-            log.info("_applied targets committed to GitHub repo.")
-            return
-        log.warning("GitHub commit failed — falling back to local write.")
+    history: dict = {}
+    sha: str = ""
 
+    # ── Read existing history from GitHub ────────────────────────────────
+    if gh_token and gh_repo:
+        try:
+            url = f"https://api.github.com/repos/{gh_repo}/contents/portfolio_history.json"
+            resp = requests.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {gh_token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                params={"ref": gh_branch},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                sha = data.get("sha", "")
+                history = json.loads(base64.b64decode(data["content"]).decode("utf-8"))
+            elif resp.status_code != 404:
+                resp.raise_for_status()
+        except Exception as exc:
+            log.warning("Could not read portfolio_history.json from GitHub: %s", exc)
+
+    if date_str in history:
+        log.info("Portfolio history already recorded for %s — skipping.", date_str)
+        return
+
+    history[date_str] = round(total_value, 2)
+    content = json.dumps(dict(sorted(history.items())), indent=2)
+
+    # ── Commit back to GitHub ─────────────────────────────────────────────
+    if gh_token and gh_repo:
+        try:
+            payload: dict = {
+                "message": f"[ems] portfolio snapshot {date_str}",
+                "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+                "branch": gh_branch,
+            }
+            if sha:
+                payload["sha"] = sha
+            url = f"https://api.github.com/repos/{gh_repo}/contents/portfolio_history.json"
+            resp = requests.put(
+                url,
+                headers={
+                    "Authorization": f"Bearer {gh_token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                json=payload,
+                timeout=20,
+            )
+            resp.raise_for_status()
+            log.info(
+                "Portfolio history committed to GitHub (%s = $%.2f).",
+                date_str, total_value,
+            )
+            return
+        except Exception as exc:
+            log.warning("GitHub commit for portfolio history failed: %s", exc)
+
+    # ── Local fallback ────────────────────────────────────────────────────
+    history_path = Path(__file__).parent / "portfolio_history.json"
     try:
-        tmp = str(TARGETS_FILE) + ".tmp"
+        tmp = str(history_path) + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write(content)
-        os.replace(tmp, str(TARGETS_FILE))
-        log.info("_applied targets saved locally.")
+        os.replace(tmp, str(history_path))
+        log.info("Portfolio history saved locally (%s = $%.2f).", date_str, total_value)
     except OSError as exc:
-        log.warning("Could not save _applied targets: %s", exc)
+        log.warning("Could not save portfolio history locally: %s", exc)
 
 
 def run() -> None:
@@ -894,6 +933,14 @@ def run() -> None:
 
         # Step 3: Fetch live account state (discovers accountId internally)
         state = get_account_state(client)
+
+        # Step 3b: Record today's portfolio value for the performance chart.
+        # This runs whether or not orders are placed, so the dashboard always
+        # has a daily data-point even on no-trade days.
+        _append_portfolio_history(
+            datetime.now().strftime("%Y-%m-%d"),
+            state.total_value,
+        )
 
         # Step 4: Guard — abort if prior orders are still pending.
         # Submitting new orders while previous ones are unresolved risks
@@ -946,10 +993,6 @@ def run() -> None:
                     sells_total,
                 )
             execute_trades(orders, client, account_id=state.account_id)
-
-            # ── Persist applied targets so next run knows what was last executed ──
-            # Re-read targets.json raw to preserve any existing keys (_comment etc.)
-            _update_applied_targets(targets)
 
     except FileNotFoundError as exc:
         log.critical("Configuration error: %s", exc)

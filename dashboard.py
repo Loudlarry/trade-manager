@@ -190,27 +190,40 @@ def _append_history(date_str: str, total_value: float) -> None:
 
 
 def _yahoo_adj_close(ticker: str, start_dt: datetime, end_dt: datetime) -> list:
-    """Fetch daily adjusted-close prices via yfinance (handles Yahoo auth automatically).
+    """Fetch daily adjusted-close prices via yfinance.
 
-    Adjusted close is equivalent to a total-return / DRIP series: dividends are
-    folded into historical prices so the return between any two adjusted-close
-    values equals buy-and-hold with all dividends reinvested.
+    Handles both old (0.2.x) and new (1.x) yfinance column layouts, including
+    multi-level column indexes that some versions return even for single tickers.
     """
-    df = yf.download(
-        ticker,
+    kwargs = dict(
         start=start_dt.strftime("%Y-%m-%d"),
         end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
         auto_adjust=True,
         progress=False,
-        multi_level_index=False,
     )
+    try:
+        df = yf.download(ticker, multi_level_index=False, **kwargs)
+    except TypeError:
+        # multi_level_index not supported in this yfinance version
+        df = yf.download(ticker, **kwargs)
+
     if df.empty:
         return []
+
+    # Flatten multi-level column index (yfinance 1.x sometimes returns this
+    # even for a single ticker when multi_level_index=False isn't honoured)
+    if hasattr(df.columns, "nlevels") and df.columns.nlevels > 1:
+        df.columns = [str(c[0]) if isinstance(c, tuple) else str(c) for c in df.columns]
+
+    close_col = next((c for c in ("Close", "Adj Close") if c in df.columns), None)
+    if close_col is None:
+        return []
+
     points = []
     for idx, row in df.iterrows():
         date  = idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
-        price = float(row["Close"])
-        if price and price == price:  # skip NaN
+        price = float(row[close_col])
+        if price == price and price > 0:   # skip NaN / zero
             points.append({"date": date, "price": price})
     return points
 
