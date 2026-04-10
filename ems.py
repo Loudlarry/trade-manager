@@ -386,18 +386,14 @@ class PublicAPIClient:
 # ─────────────────────────── Core Functions ──────────────────────────────────
 
 
-def load_targets() -> tuple[dict[str, float], dict[str, float]]:
+def load_targets() -> dict[str, float]:
     """
     Load desired portfolio weights from targets.json.
 
     File format:
         { "NVDA": 0.15, "AAPL": 0.10, "MSFT": 0.20, ... }
 
-    Also reads the "_applied" key which records the weights from the previous
-    successful run. Any ticker whose target differs from _applied bypasses the
-    drift gate, ensuring deliberate weight changes are always executed.
-
-    Returns (targets, applied_targets).
+    Returns targets dict.
     Raises on missing file, bad JSON, or weights that exceed 1.0.
     """
     log.info("Loading targets from %s", TARGETS_FILE)
@@ -407,12 +403,6 @@ def load_targets() -> tuple[dict[str, float], dict[str, float]]:
 
     with TARGETS_FILE.open("r", encoding="utf-8") as fh:
         raw = json.load(fh)
-
-    # Read and remove the _applied snapshot before further processing
-    applied_raw: dict = raw.get(_APPLIED_KEY, {})
-    applied_targets: dict[str, float] = {
-        k.upper(): float(v) for k, v in applied_raw.items()
-    }
 
     # Strip internal comment keys (keys starting with "_")
     data = {k: v for k, v in raw.items() if not k.startswith("_")}
@@ -462,7 +452,7 @@ def load_targets() -> tuple[dict[str, float], dict[str, float]]:
     for ticker, w in targets.items():
         log.info("  %-8s \u2192 target weight %.2f%%", ticker, w * 100)
 
-    return targets, applied_targets
+    return targets
 
 
 def get_account_state(client: PublicAPIClient) -> AccountState:
@@ -929,7 +919,7 @@ def run() -> None:
         client.authenticate()
 
         # Step 2: Load target weights
-        targets, _ = load_targets()
+        targets = load_targets()
 
         # Step 3: Fetch live account state (discovers accountId internally)
         state = get_account_state(client)
