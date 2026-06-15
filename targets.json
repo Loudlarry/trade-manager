@@ -1,18 +1,13 @@
 {
   "_comment": "Target portfolio weights. Must sum to <= 1.0. Remainder stays as cash.",
-  "VST": 0.12,
-  "MU": 0.11,
-  "PLMR": 0.08,
-  "EXK": 0.07,
-  "CENX": 0.07,
-  "FTAI": 0.07,
-  "DELL": 0.07,
-  "LMT": 0.06,
-  "GFI": 0.06,
-  "CDE": 0.06,
-  "NOC": 0.05,
-  "DVN": 0.05,
-  "AU": 0.05,
-  "RGLD": 0.05,
-  "PAAS": 0.05
+  "googl": 0.25,
+  "aph": 0.12,
+  "ldos": 0.10,
+  "crdo": 0.10,
+  "v": 0.08,
+  "pgr": 0.08,
+  "jpm": 0.07,
+  "xom": 0.07,
+  "ci": 0.07,
+  "nbis": 0.05
 }
