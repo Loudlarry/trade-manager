@@ -1,13 +1,13 @@
 {
   "_comment": "Target portfolio weights. Must sum to <= 1.0. Remainder stays as cash.",
-  "googl": 0.25,
-  "aph": 0.12,
-  "ldos": 0.10,
-  "crdo": 0.10,
-  "v": 0.08,
+  "googl": 0.23,
+  "aph": 0.11,
+  "ldos": 0.14,
+  "crdo": 0.08,
+  "v": 0.13,
   "pgr": 0.08,
   "jpm": 0.07,
   "xom": 0.07,
   "ci": 0.07,
-  "nbis": 0.05
+  "nbis": 0.03
 }
